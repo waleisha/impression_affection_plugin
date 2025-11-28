@@ -1359,6 +1359,67 @@ class WeightStatsCommand(BaseCommand):
             return False, error_msg, False
 
 
+class RebuildDatabaseCommand(BaseCommand):
+    """重建数据库命令"""
+
+    command_name = "rebuild_database"
+    command_description = "手动重建数据库（当数据库文件被删除时使用）"
+    command_pattern = r"^/impression\s+(?:rebuild|reset|init)(?:\s+(?P<confirm>confirm))?$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        """执行重建数据库"""
+        try:
+            confirm = self.matched_groups.get("confirm")
+
+            if confirm != "confirm":
+                message = """⚠️  重建数据库将会删除所有数据！
+如果确定要重建数据库，请使用命令：
+/impression rebuild confirm
+
+此操作将：
+- 删除所有印象数据
+- 删除所有消息记录
+- 重新创建空的数据库表"""
+                await self.send_text(message)
+                return False, None, False
+
+            # 执行重建
+            logger.info("正在重建数据库...")
+
+            # 关闭现有连接
+            if not plugin_db.is_closed():
+                plugin_db.close()
+
+            # 删除数据库文件（如果存在）
+            if os.path.exists(DB_PATH):
+                os.remove(DB_PATH)
+                logger.info(f"已删除数据库文件: {DB_PATH}")
+
+            # 重新创建数据库和表
+            # 直接调用，确保插件初始化
+            from impression_affection_plugin import plugin as plugin_module
+            # 创建一个临时的插件实例来调用初始化方法
+            # 但更好的方法是直接调用函数
+            try:
+                plugin_db.connect()
+                plugin_db.create_tables([UserImpression, UserMessageState, UserMessage, ImpressionMessageRecord], safe=True)
+                logger.info("数据库表创建/验证完成")
+            except Exception as db_error:
+                logger.error(f"ERROR 创建数据库失败: {db_error}")
+                raise
+
+            message = "✅ 数据库重建完成！\n数据库文件已重新创建，所有表已初始化。"
+            await self.send_text(message)
+            logger.info("数据库重建完成")
+            return True, None, True
+
+        except Exception as e:
+            logger.error(f"ERROR 重建数据库失败: {str(e)}")
+            error_msg = f"重建数据库失败: {str(e)}"
+            await self.send_text(error_msg)
+            return False, error_msg, False
+
+
 # 插件注册
 @register_plugin
 class ImpressionAffectionPlugin(BasePlugin):
@@ -1558,6 +1619,7 @@ JSON格式：
                 (SetAffectionCommand.get_command_info(), SetAffectionCommand),
                 (ListImpressionsCommand.get_command_info(), ListImpressionsCommand),
                 (WeightStatsCommand.get_command_info(), WeightStatsCommand),
+                (RebuildDatabaseCommand.get_command_info(), RebuildDatabaseCommand),
             ])
 
         return components
@@ -1566,8 +1628,8 @@ JSON格式：
         """记录插件初始化信息"""
         logger.info("正在初始化印象好感度系统插件...")
 
-        # 创建数据库表
-        plugin_db.create_tables([UserImpression, UserMessageState, UserMessage, ImpressionMessageRecord])
+        # 确保数据库和表已创建
+        self._ensure_database_created()
 
         # 检查配置
         embedding_config = self.config.get("embedding_provider", {})
@@ -1586,6 +1648,25 @@ JSON格式：
             logger.warning("LLM API Key未配置")
 
         logger.info("插件初始化完成")
+
+    def _ensure_database_created(self):
+        """确保数据库文件已创建，包括在删除后重新创建"""
+        try:
+            # 检查数据库文件是否存在
+            if not os.path.exists(DB_PATH):
+                logger.info(f"数据库文件不存在，正在创建: {DB_PATH}")
+
+            # 确保数据库连接已初始化
+            plugin_db.connect()
+
+            # 创建所有表（如果不存在）
+            plugin_db.create_tables([UserImpression, UserMessageState, UserMessage, ImpressionMessageRecord], safe=True)
+
+            logger.info("数据库表创建/验证完成")
+
+        except Exception as e:
+            logger.error(f"ERROR 创建数据库失败: {str(e)}")
+            raise
 
     def setup(self):
         """插件初始化"""
