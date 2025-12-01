@@ -4,6 +4,7 @@
 
 from typing import List, Tuple, Type, Dict, Any, Optional
 import os
+import asyncio
 
 from src.plugin_system import (
     BasePlugin,
@@ -45,12 +46,12 @@ logger = get_logger("impression_affection_system")
 
 
 class ImpressionUpdateHandler(BaseEventHandler):
-    """自动更新用户印象和好感度的事件处理器"""
+    """自动更新用户印象和好感度的事件处理器（异步执行）"""
 
     event_type = EventType.AFTER_LLM
     handler_name = "update_impression_handler"
-    handler_description = "每次LLM回复后自动更新用户印象和好感度"
-    intercept_message = True
+    handler_description = "每次LLM回复后更新用户印象和好感度"
+    intercept_message = False  # 不拦截消息，允许正常回复
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -59,11 +60,42 @@ class ImpressionUpdateHandler(BaseEventHandler):
         self.message_service = None
         self.llm_client = None
         self.text_impression_service = None
+        self._services_initialized = False
 
     async def execute(self, message) -> tuple:
-        """执行事件处理器"""
-        result = await self.handle(message)
-        return True, True, None, result, None
+        """执行事件处理器 - 异步启动印象更新任务"""
+        try:
+            # 确保服务已初始化
+            self._ensure_services_initialized()
+            
+            # 异步启动印象更新，不阻塞主流程
+            asyncio.create_task(self._async_update_impression(message))
+            return True, True, "印象更新任务已启动", None, None
+                
+        except Exception as e:
+            logger.error(f"印象更新执行失败: {str(e)}")
+            return True, True, f"印象更新执行失败: {str(e)}", None, None
+
+    async def _async_update_impression(self, event_data):
+        """异步更新印象和好感度"""
+        try:
+            # 确保服务已初始化
+            self._ensure_services_initialized()
+            
+            # 执行印象更新逻辑
+            result = await self.handle(event_data)
+            
+        except Exception as e:
+            logger.error(f"印象更新失败: {str(e)}")
+            # 异步执行中的错误不影响主流程
+
+    def _ensure_services_initialized(self):
+        """确保服务已初始化（只初始化一次）"""
+        if self._services_initialized:
+            return
+        
+        self._init_services()
+        self._services_initialized = True
 
     def _init_services(self):
         """初始化服务"""
@@ -86,8 +118,8 @@ class ImpressionUpdateHandler(BaseEventHandler):
     async def handle(self, event_data) -> CustomEventHandlerResult:
         """处理事件：每次LLM回复后自动更新印象和好感度"""
         try:
-            # 初始化服务
-            self._init_services()
+            # 确保服务已初始化
+            self._ensure_services_initialized()
             
             logger.debug(f"收到AFTER_LLM事件，事件数据类型: {type(event_data)}")
 
@@ -254,119 +286,196 @@ class ImpressionAffectionPlugin(BasePlugin):
 
     # 配置模式 - 详细的配置定义
     config_schema = {
+        # =============================================================================
+        # 基础配置
+        # =============================================================================
         "plugin": {
             "enabled": ConfigField(
                 type=bool,
-                default=True,
-                description="是否启用插件。设置为false可以临时禁用插件功能"
+                default=False,
+                description="是否启用插件"
             ),
             "config_version": ConfigField(
                 type=str,
-                default="2.0.0",
-                description="配置文件版本，用于版本管理和兼容性检查"
+                default="2.1.0",
+                description="配置文件版本"
             )
         },
+
+        # =============================================================================
+        # LLM 配置
+        # =============================================================================
         "llm_provider": {
             "provider_type": ConfigField(
                 type=str,
                 default="openai",
-                description="LLM提供商类型。可选值: 'openai'(OpenAI格式API)或'custom'(自定义API)"
+                description="印象构建/好感度更新LLM提供商 (openai/custom)"
             ),
             "api_key": ConfigField(
                 type=str,
-                default="sk-your-api-key-here",
-                description="LLM API密钥。必需，用于认证API调用"
+                default="",
+                description="API密钥"
             ),
             "base_url": ConfigField(
                 type=str,
                 default="https://api.openai.com/v1",
-                description="API基础URL。OpenAI格式API的端点地址，如使用官方API可保持默认"
+                description="API基础URL"
             ),
             "model_id": ConfigField(
                 type=str,
                 default="gpt-3.5-turbo",
-                description="LLM模型ID。例如: gpt-3.5-turbo, deepseek-chat等"
+                description="模型名称"
+            )
+        },
+
+        # =============================================================================
+        # 数据库配置
+        # =============================================================================
+        "database": {
+            "enabled": ConfigField(
+                type=bool,
+                default=True,
+                description="启用数据库连接"
             ),
-            "api_endpoint": ConfigField(
+            "main_db_path": ConfigField(
                 type=str,
                 default="",
-                description="自定义API端点。仅在使用custom提供商时需要，完整的API调用地址"
+                description="数据库路径 (留空使用默认)"
             )
         },
-        
-        "impression": {
-            "max_context_entries": ConfigField(
+
+        # =============================================================================
+        # 历史消息配置
+        # =============================================================================
+        "history": {
+            "max_messages": ConfigField(
                 type=int,
-                default=30,
-                description="每次触发时获取的上下文条目上限。用于限制构建印象时参考的历史消息数量，避免token消耗过大"
+                default=20,
+                description="最大历史消息数 (10-50)"
+            ),
+            "hours_back": ConfigField(
+                type=int,
+                default=72,
+                description="回溯小时数 (24-168)"
+            ),
+            "min_message_length": ConfigField(
+                type=int,
+                default=5,
+                description="最小消息长度"
+            ),
+            "recent_hours": ConfigField(
+                type=int,
+                default=24,
+                description="最近互动回溯小时数 (6-48)"
             )
         },
+
+        # =============================================================================
+        # 权重筛选配置
+        # =============================================================================
         "weight_filter": {
             "filter_mode": ConfigField(
                 type=str,
                 default="selective",
-                description="权重筛选模式。可选值: 'disabled'(禁用筛选，所有消息都更新印象), 'selective'(仅高权重消息更新印象), 'balanced'(高权重+中权重消息更新印象)"
+                description="筛选模式: disabled(不筛选)/selective(仅高权重)/balanced(仅高/中权重)"
             ),
             "high_weight_threshold": ConfigField(
                 type=float,
                 default=70.0,
-                description="高权重消息阈值(0-100)。高于此阈值的消息被认为包含重要信息，用于印象构建。建议范围: 60.0-80.0"
+                description="高权重阈值 (60.0-80.0)"
             ),
             "medium_weight_threshold": ConfigField(
                 type=float,
                 default=40.0,
-                description="中权重消息阈值(0-100)。用于balanced模式，包含一定信息量但不是特别重要的消息。建议范围: 30.0-50.0"
+                description="中权重阈值 (30.0-50.0)"
+            ),
+            "use_custom_weight_model": ConfigField(
+                type=bool,
+                default=False,
+                description="是否启用自定义权重判断模型"
+            ),
+            "weight_model_provider": ConfigField(
+                type=str,
+                default="openai",
+                description="权重判断模型提供商"
+            ),
+            "weight_model_api_key": ConfigField(
+                type=str,
+                default="",
+                description="权重判断模型API密钥"
+            ),
+            "weight_model_base_url": ConfigField(
+                type=str,
+                default="https://api.openai.com/v1",
+                description="权重判断模型API地址"
+            ),
+            "weight_model_id": ConfigField(
+                type=str,
+                default="gpt-3.5-turbo",
+                description="权重判断模型ID"
             ),
             "weight_evaluation_prompt": ConfigField(
                 type=str,
-                default="评估消息权重（0-100），用于判断是否用于构建用户印象。权重评估标准：高权重(70-100): 包含重要个人信息、兴趣爱好、价值观、情感表达、深度思考、独特观点、生活经历分享；中权重(40-69): 一般日常对话、简单提问、客观陈述、基础信息交流；低权重(0-39): 简单问候、客套话、无实质内容的互动、表情符号。特别注意：分享个人喜好（如书籍、音乐、电影等）、询问对方偏好、表达个人观点都应该给予较高权重。只返回键值对格式：WEIGHT_SCORE: 分数;WEIGHT_LEVEL: high/medium/low;REASON: 评估原因;消息: {message};上下文: {context}",
-                description="权重评估提示词模板。自定义LLM评估消息权重的提示词，支持{message}和{context}占位符。修改此提示词可能影响权重评估准确性，建议谨慎修改"
+                default="基于消息内容和上下文对话，评估消息权重（0-100）。权重评估标准：高权重(70-100): 包含重要个人信息、兴趣爱好、价值观、情感表达、深度思考、独特观点、生活经历分享；中权重(40-69): 一般日常对话、简单提问、客观陈述、基础信息交流；低权重(0-39): 简单问候、客套话、无实质内容的互动、表情符号。特别注意：结合上下文判断，分享个人喜好、询问对方偏好、表达个人观点都应该给予较高权重。只返回键值对格式：WEIGHT_SCORE: 分数;WEIGHT_LEVEL: high/medium/low;REASON: 评估原因;当前消息: {message};历史上下文: {context}",
+                description="权重评估提示词模板"
             )
         },
+
+        # =============================================================================
+        # 好感度配置
+        # =============================================================================
         "affection_increment": {
             "friendly_increment": ConfigField(
                 type=float,
                 default=2.0,
-                description="友善评论好感度增幅。用户发送友善、赞美、鼓励类消息时的分数变化。建议范围: 1.0-5.0，过高可能导致好感度增长过快"
+                description="友善消息增幅 (1.0-5.0)"
             ),
             "neutral_increment": ConfigField(
                 type=float,
                 default=0.5,
-                description="中性评论好感度增幅。用户发送客观、信息性消息时的分数变化。建议范围: 0.1-1.0，用于维持基础好感度增长"
+                description="中性消息增幅 (0.1-1.0)"
             ),
             "negative_increment": ConfigField(
                 type=float,
                 default=-3.0,
-                description="负面评论好感度增幅。用户发送批评、讽刺、攻击类消息时的分数变化。建议范围: -5.0到-1.0，过低可能导致好感度下降过快"
+                description="负面消息增幅 (-5.0到-1.0)"
             )
         },
+
+        # =============================================================================
+        # 提示词模板
+        # =============================================================================
         "prompts": {
             "impression_template": ConfigField(
                 type=str,
-                default="根据用户消息按8个维度生成印象，每项10字内，信息不足用待观察。只返回键值对格式：personality_traits:性格特征;interests_hobbies:兴趣爱好;communication_style:交流风格;emotional_tendencies:情感倾向;behavioral_patterns:行为模式;values_attitudes:价值观态度;relationship_preferences:关系偏好;growth_development:成长发展。历史: {history_context};消息: {message}",
-                description="印象分析提示词模板。自定义LLM生成印象描述的提示词，支持{history_context}, {message}, {context}占位符。修改此提示词可能影响印象描述质量"
+                default="基于用户的聊天记录，生成一段自然、整体的印象描述，像朋友介绍这个人一样。要求：1.用'用户xxx是一个...'的句式开头；2.描述性格特点、兴趣爱好、交流方式等；3.语言自然流畅，避免机械的标签化描述；4.长度控制在50-100字；5.如果信息不足，可以适当推测并用'似乎'、'看起来'等词。历史对话: {history_context} 当前消息: {message} 请生成印象描述:",
+                description="印象分析提示词模板"
             ),
             "affection_template": ConfigField(
                 type=str,
                 default="评估用户消息情感倾向（friendly/neutral/negative）。只返回键值对格式：TYPE: friendly/neutral/negative;REASON: 评估原因;消息: {message}",
-                description="好感度评估提示词模板。自定义LLM评估情感倾向的提示词，支持{message}, {context}占位符。修改此提示词可能影响情感判断准确性"
+                description="好感度评估提示词模板"
             )
         },
+
+        # =============================================================================
+        # 功能开关
+        # =============================================================================
         "features": {
             "auto_update": ConfigField(
                 type=bool,
                 default=True,
-                description="是否自动更新印象和好感度。禁用后插件不会自动处理消息，需要手动调用工具。生产环境建议保持启用"
+                description="自动更新印象和好感度"
             ),
             "enable_commands": ConfigField(
                 type=bool,
                 default=True,
-                description="是否启用管理命令。启用后可以使用/impression view等命令查看和管理用户印象。调试时可启用"
+                description="启用管理命令"
             ),
             "enable_tools": ConfigField(
                 type=bool,
                 default=True,
-                description="是否启用工具组件。启用后LLM可以调用get_user_impression等工具获取用户印象数据。核心功能，建议保持启用"
+                description="启用工具组件"
             )
         }
     }

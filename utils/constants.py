@@ -27,7 +27,7 @@ COMMENT_TYPES = {
     "negative": "差劲"
 }
 
-# 默认配置
+# 默认配置（作为备用，实际配置由config_schema定义）
 DEFAULT_CONFIG = {
     "plugin": {
         "enabled": True,
@@ -38,7 +38,7 @@ DEFAULT_CONFIG = {
         "base_url": "https://api.openai.com/v1"
     },
     "impression": {
-        "max_context_entries": 30
+        "max_context_entries": 30  # 这个值会被config_schema中的配置覆盖
     },
     "weight_filter": {
         "filter_mode": "selective",

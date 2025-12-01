@@ -99,41 +99,22 @@ class GetUserImpressionTool(BaseTool):
             logger.debug(f"最终查询结果: {impression}, 匹配ID: {matched_id}")
 
             if impression:
-                # 获取印象摘要
-                impression_summary = impression.get_impression_summary()
+                # 获取自然语言印象
+                natural_impression = impression.interests_hobbies.strip()  # 从复用的字段获取
                 
                 # 显示原始查询ID和实际匹配的ID
                 display_id = user_id
                 if matched_id and matched_id != user_id:
                     display_id = f"{user_id} (实际ID: {matched_id})"
                 
-                # 构建详细的多维度展示
-                dimensions_detail = []
-                dimension_names = {
-                    "personality_traits": "性格特征",
-                    "interests_hobbies": "兴趣爱好", 
-                    "communication_style": "交流风格",
-                    "emotional_tendencies": "情感倾向",
-                    "behavioral_patterns": "行为模式",
-                    "values_attitudes": "价值观态度",
-                    "relationship_preferences": "关系偏好",
-                    "growth_development": "成长发展"
-                }
-                
-                for field, name in dimension_names.items():
-                    content = getattr(impression, field, "").strip()
-                    if content:
-                        dimensions_detail.append(f"  {name}: {content}")
-                
-                dimensions_text = "\n".join(dimensions_detail) if dimensions_detail else "  暂无详细数据"
+                # 如果没有自然印象，显示默认信息
+                if not natural_impression:
+                    natural_impression = "用户印象正在构建中..."
                 
                 result = f"""
 用户印象数据 (ID: {display_id})
 ━━━━━━━━━━━━━━━━━━━━━━
-印象摘要: {impression_summary}
-
-详细信息:
-{dimensions_text}
+印象描述: {natural_impression}
 
 好感度: {impression.affection_score:.1f}/100 ({impression.affection_level})
 累计消息: {impression.message_count} 条
@@ -215,33 +196,30 @@ class SearchImpressionsTool(BaseTool):
                     "content": f"用户 {user_id} 暂无印象数据"
                 }
 
-            # 在各个维度中搜索关键词
-            matched_dimensions = []
-            dimension_names = {
-                "personality_traits": "性格特征",
-                "interests_hobbies": "兴趣爱好", 
-                "communication_style": "交流风格",
-                "emotional_tendencies": "情感倾向",
-                "behavioral_patterns": "行为模式",
-                "values_attitudes": "价值观态度",
-                "relationship_preferences": "关系偏好",
-                "growth_development": "成长发展"
-            }
+            # 在自然语言印象中搜索关键词
+            natural_impression = impression.interests_hobbies.strip()  # 从复用的字段获取
             
-            keyword_lower = keyword.lower()
-            
-            for field, name in dimension_names.items():
-                content = getattr(impression, field, "").strip()
-                if content and keyword_lower in content.lower():
-                    matched_dimensions.append(f"  {name}: {content}")
-
-            if matched_dimensions:
-                result = f"用户 {user_id} 印象中找到关键词「{keyword}」的相关内容:\n\n"
-                result += "\n".join(matched_dimensions)
+            if natural_impression and keyword.lower() in natural_impression.lower():
+                # 提取包含关键词的上下文
+                words = natural_impression.split()
+                context_parts = []
+                
+                for i, word in enumerate(words):
+                    if keyword.lower() in word.lower():
+                        # 获取前后各2个词作为上下文
+                        start = max(0, i - 2)
+                        end = min(len(words), i + 3)
+                        context = " ".join(words[start:end])
+                        context_parts.append(f"...{context}...")
+                
+                result = f"用户 {user_id} 印象描述中找到关键词「{keyword}」:\n\n"
+                result += f"完整印象: {natural_impression}\n\n"
+                if context_parts:
+                    result += "相关上下文:\n" + "\n".join(context_parts)
                 result += f"\n\n好感度: {impression.affection_score:.1f}/100 ({impression.affection_level})"
                 result += f"\n更新时间: {impression.updated_at.strftime('%Y-%m-%d %H:%M:%S')}"
             else:
-                result = f"用户 {user_id} 的印象中未找到关键词「{keyword}」的相关内容"
+                result = f"用户 {user_id} 的印象描述中未找到关键词「{keyword}」"
 
             return {
                 "name": self.name,
