@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "name": "印象和好感度系统插件",
-  "version": "1.2.0",
-  "description": "为机器人添加动态印象和好感度记忆系统，支持AI生成自然语言印象、智能向量检索和增量消息处理",
+  "version": "2.0.0",
+  "description": "为麦麦添加动态印象和好感度记忆系统，LLM生成自然语言印象、使用独立的数据库",
   "author": {
     "name": "heitiehu-beep",
     "url": "https://github.com/heitiehu-beep"
@@ -12,6 +12,6 @@
     "min_version": "0.11.0"
   },
   "repository_url": "https://github.com/heitiehu-beep/impression_affection_plugin",
-  "keywords": ["记忆系统", "人工智能", "好感度", "印象", "向量检索"],
+  "keywords": ["记忆系统","好感度","印象"],
   "categories": ["Entertainment & Interaction"]
 }
