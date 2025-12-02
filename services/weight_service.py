@@ -2,7 +2,9 @@
 权重评估服务 - 评估消息权重，筛选高价值消息
 """
 
-from typing import Dict, Any, Tuple, Optional
+import os
+import hashlib
+from typing import Dict, Any, Tuple, Optional, List, Set
 from datetime import datetime
 from collections import defaultdict
 
@@ -40,6 +42,88 @@ class WeightService:
         # 初始化权重评估客户端
         self._init_weight_llm_client()
 
+    
+
+    def is_message_processed(self, user_id: str, message_id: str = None) -> bool:
+        """
+        检查消息是否已经处理过（基于message_id）
+        
+        Args:
+            user_id: 用户ID
+            message_id: 主程序的实际message_id
+            
+        Returns:
+            是否已处理
+        """
+        # 如果没有message_id，返回False（让主流程处理）
+        if not message_id:
+            logger.debug(f"无message_id，无法查重: 用户 {user_id}")
+            return False
+        
+        # 通过MessageService检查（统一查重标准）
+        try:
+            # 导入MessageService避免循环导入
+            from .message_service import MessageService
+            message_service = MessageService(self.config)
+            return message_service.is_message_processed(user_id, message_id)
+        except Exception as e:
+            logger.error(f"查重检查失败: {str(e)}")
+            return False
+
+    def mark_message_processed(self, user_id: str, message_id: str = None):
+        """
+        标记消息为已处理（基于message_id）
+        
+        Args:
+            user_id: 用户ID
+            message_id: 主程序的实际message_id
+        """
+        if not message_id:
+            logger.debug(f"无message_id，无法标记处理: 用户 {user_id}")
+            return
+        
+        # 通过MessageService标记（统一查重标准）
+        try:
+            # 导入MessageService避免循环导入
+            from .message_service import MessageService
+            message_service = MessageService(self.config)
+            message_service.mark_message_processed(user_id, message_id)
+            logger.debug(f"已标记消息为已处理: 用户 {user_id}, message_id {message_id}")
+        except Exception as e:
+            logger.error(f"标记处理消息失败: {str(e)}")
+
+    def get_processed_message_ids(self, user_id: str) -> Set[str]:
+        """
+        获取用户已处理的消息ID列表
+        
+        Args:
+            user_id: 用户ID
+            
+        Returns:
+            已处理的消息ID集合
+        """
+        # 通过MessageService获取（统一查重标准）
+        try:
+            # 导入MessageService避免循环导入
+            from .message_service import MessageService
+            message_service = MessageService(self.config)
+            processed_ids = message_service.get_processed_message_ids(user_id)
+            
+            # 过滤掉无效的ID（只保留数字格式的真实message_id）
+            valid_ids = set()
+            for msg_id in processed_ids:
+                if msg_id and msg_id.isdigit():
+                    valid_ids.add(msg_id)
+                else:
+                    logger.debug(f"过滤无效message_id: {msg_id}")
+            
+            logger.debug(f"用户 {user_id} 有效已处理消息ID: {len(valid_ids)} 个")
+            return valid_ids
+            
+        except Exception as e:
+            logger.error(f"获取已处理消息ID失败: {str(e)}")
+            return set()
+
     def _init_weight_llm_client(self):
         """初始化权重评估专用LLM客户端"""
         if not self.use_custom_weight_model:
@@ -58,7 +142,7 @@ class WeightService:
             }
             
             self.weight_llm_client = LLMClient(weight_model_config)
-            logger.info(f"权重评估模型已初始化: {weight_model_config['model_id']}")
+            logger.debug(f"权重评估模型已初始化: {weight_model_config['model_id']}")
             
         except Exception as e:
             logger.error(f"权重评估模型初始化失败: {str(e)}")
@@ -78,11 +162,17 @@ class WeightService:
             (是否成功, 权重分数, 权重等级)
         """
         try:
-            # 检查消息是否已存在
-            user_messages = self.message_weights.get(user_id, [])
-            for msg_record in user_messages:
-                if msg_record[0] == message_id:  # message_id matches
-                    return True, msg_record[1], msg_record[2]  # score, level
+            # 标准化用户ID
+            normalized_user_id = str(user_id).strip()
+            
+            # 检查消息是否已处理过（基于message_id去重）
+            if self.is_message_processed(normalized_user_id, message_id):
+                logger.debug(f"消息已处理，跳过权重评估: 用户 {normalized_user_id}, message_id {message_id}")
+                # 返回已存在的权重评估结果
+                user_messages = self.message_weights.get(normalized_user_id, [])
+                for msg_record in user_messages:
+                    if msg_record[0] == message_id:  # message_id matches
+                        return True, msg_record[1], msg_record[2]  # score, level
 
             # 生成提示词（包含上下文）
             prompt = self._build_weight_prompt(message, context)
@@ -97,20 +187,23 @@ class WeightService:
 
             if not success:
                 # 评估失败，使用默认权重
-                return self._save_default_weight(user_id, message_id, message, context)
+                return self._save_default_weight(normalized_user_id, message_id, message, context)
 
             # 解析结果
             result = self._parse_weight_response(content)
 
             if not result:
                 # 解析失败，使用默认权重
-                return self._save_default_weight(user_id, message_id, message, context)
+                return self._save_default_weight(normalized_user_id, message_id, message, context)
 
             weight_score = float(result.get("weight_score", 0.0))
             weight_level = result.get("weight_level", "low")
 
             # 保存到内存
-            self._save_weight(user_id, message_id, message, context, weight_score, weight_level)
+            self._save_weight(normalized_user_id, message_id, message, context, weight_score, weight_level)
+            
+            # 标记消息为已处理（基于message_id）
+            self.mark_message_processed(normalized_user_id, message_id)
 
             return True, weight_score, weight_level
 
@@ -193,9 +286,10 @@ class WeightService:
             context[:100]   # 保存上下文的前100字符
         ))
         
-        # 限制每个用户最多保存100条记录
-        if len(self.message_weights[user_id]) > 100:
-            self.message_weights[user_id] = self.message_weights[user_id][-100:]
+        # 限制每个用户保存的记录数，从配置读取
+        weight_cache_limit = self.config.get("weight_filter", {}).get("max_weight_records", 100)
+        if len(self.message_weights[user_id]) > weight_cache_limit:
+            self.message_weights[user_id] = self.message_weights[user_id][-weight_cache_limit:]
 
     def _save_default_weight(self, user_id: str, message_id: str, message: str, context: str) -> Tuple[bool, float, str]:
         """保存默认权重"""
@@ -224,14 +318,43 @@ class WeightService:
         if self.filter_mode == "disabled":
             return "", []
 
-        # 首先尝试从数据库获取历史消息
-        db_messages = self._get_historical_messages(user_id, limit)
+        # 标准化用户ID
+        normalized_user_id = str(user_id).strip()
+        
+        # 获取已处理的消息ID，用于去重
+        processed_message_ids = self.get_processed_message_ids(normalized_user_id)
+        
+        logger.debug(f"用户 {normalized_user_id} 查重统计: 已处理消息ID {len(processed_message_ids)} 个")
+        
+        # 首先尝试从数据库获取历史消息（排除已处理的）
+        db_messages = self._get_historical_messages(normalized_user_id, limit, exclude_message_ids=list(processed_message_ids))
+        
+        # 核心修复：立即将获取到的历史消息标记为已处理
+        if db_messages:
+            try:
+                # 导入MessageService避免循环导入
+                from .message_service import MessageService
+                message_service = MessageService(self.config)
+                
+                marked_count = 0
+                for db_msg in db_messages:
+                    msg_id = db_msg.get("message_id")
+                    if msg_id and msg_id.isdigit():
+                        message_service.mark_message_processed(normalized_user_id, msg_id)
+                        marked_count += 1
+                
+                logger.debug(f"已标记 {marked_count} 条历史消息为已处理: 用户 {normalized_user_id}")
+                
+            except Exception as e:
+                logger.error(f"标记历史消息处理失败: {str(e)}")
         
         # 合并内存中的消息权重记录
-        user_messages = self.message_weights.get(user_id, [])
+        user_messages = self.message_weights.get(normalized_user_id, [])
         
         # 根据筛选模式过滤消息
         filtered_messages = []
+        
+        logger.info(f"用户 {normalized_user_id} 消息去重统计: 已处理消息ID {len(processed_message_ids)} 条，数据库获取 {len(db_messages)} 条，内存权重记录 {len(user_messages)} 条")
         
         # 处理数据库历史消息（默认给予中等权重）
         for db_msg in db_messages:
@@ -241,36 +364,24 @@ class WeightService:
                 "weight_level": "medium",
                 "timestamp": db_msg["datetime"],
                 "content": db_msg["content"],
-                "source": "database"
+                "source": "database",
+                "content_hash": db_msg.get("content_hash", "")
             })
         
         # 处理内存中的消息权重记录
         for msg_record in user_messages:
             message_id, weight_score, weight_level, timestamp, message_content, context = msg_record
             
+            # 根据筛选模式过滤
+            should_include = False
             if self.filter_mode == "selective":
-                if weight_score >= self.high_threshold:
-                    filtered_messages.append({
-                        "message_id": message_id,
-                        "weight_score": weight_score,
-                        "weight_level": weight_level,
-                        "timestamp": timestamp,
-                        "content": message_content,
-                        "source": "memory",
-                        "context": context
-                    })
+                should_include = weight_score >= self.high_threshold
             elif self.filter_mode == "balanced":
-                if weight_score >= self.medium_threshold:
-                    filtered_messages.append({
-                        "message_id": message_id,
-                        "weight_score": weight_score,
-                        "weight_level": weight_level,
-                        "timestamp": timestamp,
-                        "content": message_content,
-                        "source": "memory",
-                        "context": context
-                    })
+                should_include = weight_score >= self.medium_threshold
             else:  # 默认包含所有消息
+                should_include = True
+            
+            if should_include:
                 filtered_messages.append({
                     "message_id": message_id,
                     "weight_score": weight_score,
@@ -278,34 +389,32 @@ class WeightService:
                     "timestamp": timestamp,
                     "content": message_content,
                     "source": "memory",
-                    "context": context
+                    "context": context,
+                    "content_hash": hashlib.md5(message_content.encode('utf-8')).hexdigest()
                 })
 
         # 按时间倒序排列，取前limit条
         filtered_messages.sort(key=lambda x: x["timestamp"], reverse=True)
         filtered_messages = filtered_messages[:limit]
 
+        # 统计过滤结果
+        total_db_messages = len(db_messages)
+        total_memory_messages = len(user_messages)
+        total_available = total_db_messages + total_memory_messages
+        actually_filtered = len(filtered_messages)
+        
+        logger.info(f"用户 {normalized_user_id} 消息筛选统计: 数据库消息 {total_db_messages} 条，内存消息 {total_memory_messages} 条，总可用 {total_available} 条，筛选后 {actually_filtered} 条，限制 {limit} 条")
+
         if not filtered_messages:
             return "", []
 
-        # 构建上下文（包含历史对话信息）
+        # 构建上下文（保持对话完整性）
         contexts = []
         message_ids = []
         
-        # 首先添加历史对话摘要
-        if db_messages:
-            contexts.append("历史对话背景:")
-            for db_msg in db_messages[:5]:  # 显示最近5条历史消息作为背景
-                timestamp = db_msg["datetime"]
-                content = db_msg["content"][:80]  # 限制长度
-                if isinstance(timestamp, datetime):
-                    time_str = timestamp.strftime('%m-%d %H:%M')
-                else:
-                    time_str = str(timestamp)
-                contexts.append(f"[{time_str}] {content}...")
-
-        # 然后添加当前筛选的消息
-        contexts.append("\n当前对话:")
+        # 添加完整的对话上下文，不分离历史和当前消息
+        contexts.append(f"用户 {normalized_user_id} 的对话记录:")
+        
         for msg in filtered_messages:
             timestamp = msg["timestamp"]
             content = msg["content"]
@@ -331,13 +440,14 @@ class WeightService:
 
         return result, message_ids
 
-    def _get_historical_messages(self, user_id: str, limit: int = 10) -> list:
+    def _get_historical_messages(self, user_id: str, limit: int = 10, exclude_message_ids: List[str] = None) -> list:
         """
         从数据库获取历史消息
         
         Args:
             user_id: 用户ID
             limit: 最大消息数
+            exclude_message_ids: 要排除的消息ID列表
             
         Returns:
             历史消息列表
@@ -355,11 +465,12 @@ class WeightService:
             # 转换小时数为天数（数据库服务需要天数参数）
             days_back = max(1, hours_back // 24)  # 至少1天
             
-            # 使用配置的参数获取历史消息
+            # 使用配置的参数获取历史消息，支持排除已处理的消息
             history_messages = self.db_service.get_user_chat_history(
                 user_id=user_id,
                 limit=min(limit, max_messages),  # 不超过配置的最大值
-                days_back=days_back
+                days_back=days_back,
+                exclude_message_ids=exclude_message_ids or []
             )
             
             # 过滤掉太短的消息
@@ -372,7 +483,7 @@ class WeightService:
             
         except Exception as e:
             # 记录错误但不影响主流程
-            print(f"获取历史消息失败: {str(e)}")
+            logger.error(f"获取历史消息失败: {str(e)}")
             return []
 
     def get_user_chat_summary(self, user_id: str) -> Dict[str, Any]:
@@ -445,6 +556,9 @@ class WeightService:
             历史上下文字符串
         """
         try:
+            # 标准化用户ID
+            normalized_user_id = str(user_id).strip()
+            
             # 从配置获取参数
             history_config = self.config.get("history", {})
             max_messages = history_config.get("max_messages", 20)
@@ -454,11 +568,13 @@ class WeightService:
             # 转换小时数为天数
             days_back = max(1, hours_back // 24)
             
-            # 获取历史消息
+            # 获取历史消息，排除已处理的
+            processed_message_ids = self.get_processed_message_ids(normalized_user_id)
             history_messages = self.db_service.get_user_chat_history(
-                user_id=user_id,
+                user_id=normalized_user_id,
                 limit=max_messages,
-                days_back=days_back
+                days_back=days_back,
+                exclude_message_ids=list(processed_message_ids)
             )
             
             # 过滤掉太短的消息
@@ -472,7 +588,7 @@ class WeightService:
             
             # 构建上下文
             contexts = []
-            contexts.append("历史对话:")
+            contexts.append(f"用户 {normalized_user_id} 的历史对话:")
             
             # 使用配置中的最大消息数
             for msg in filtered_messages:

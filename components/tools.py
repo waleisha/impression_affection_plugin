@@ -99,13 +99,19 @@ class GetUserImpressionTool(BaseTool):
             logger.debug(f"最终查询结果: {impression}, 匹配ID: {matched_id}")
 
             if impression:
-                # 获取自然语言印象
-                natural_impression = impression.interests_hobbies.strip()  # 从复用的字段获取
+                # 获取自然语言印象 - 从正确的字段读取
+                natural_impression = impression.personality_traits.strip()  # 修复：从实际存储的字段读取
                 
                 # 显示原始查询ID和实际匹配的ID
                 display_id = user_id
                 if matched_id and matched_id != user_id:
                     display_id = f"{user_id} (实际ID: {matched_id})"
+                
+                # 印象读取成功日志
+                if natural_impression:
+                    logger.info(f"印象读取成功: 用户 {display_id}, 印象长度: {len(natural_impression)} 字符")
+                else:
+                    logger.warning(f"印象数据为空: 用户 {display_id}")
                 
                 # 如果没有自然印象，显示默认信息
                 if not natural_impression:
@@ -197,7 +203,7 @@ class SearchImpressionsTool(BaseTool):
                 }
 
             # 在自然语言印象中搜索关键词
-            natural_impression = impression.interests_hobbies.strip()  # 从复用的字段获取
+            natural_impression = impression.personality_traits.strip()  # 修复：从实际存储的字段读取
             
             if natural_impression and keyword.lower() in natural_impression.lower():
                 # 提取包含关键词的上下文

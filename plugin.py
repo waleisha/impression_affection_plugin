@@ -127,15 +127,24 @@ class ImpressionUpdateHandler(BaseEventHandler):
             message = None
             user_id = ""
             
-            # 尝试不同的消息获取方式
+            # 统一用户ID处理和消息获取方式
+            user_id = ""
+            message = None
+            
+            # 使用标准化的用户ID提取方法
+            from .services.message_service import MessageService
+            
             if hasattr(event_data, 'message_base_info'):
                 message = event_data
-                user_id = str(message.message_base_info.get('user_id', ''))
+                raw_user_id = message.message_base_info.get('user_id', '')
+                user_id = MessageService.normalize_user_id(raw_user_id)
             elif hasattr(event_data, 'user_id'):
-                user_id = str(event_data.user_id)
+                raw_user_id = event_data.user_id
+                user_id = MessageService.normalize_user_id(raw_user_id)
                 message = event_data
             elif hasattr(event_data, 'plain_text'):
-                user_id = str(getattr(event_data, 'user_id', ''))
+                raw_user_id = getattr(event_data, 'user_id', '')
+                user_id = MessageService.normalize_user_id(raw_user_id)
                 message = event_data
             else:
                 # 尝试从事件数据中提取消息
@@ -144,7 +153,8 @@ class ImpressionUpdateHandler(BaseEventHandler):
                         if hasattr(event_data, attr_name):
                             potential_msg = getattr(event_data, attr_name)
                             if hasattr(potential_msg, 'user_id'):
-                                user_id = str(potential_msg.user_id)
+                                raw_user_id = potential_msg.user_id
+                                user_id = MessageService.normalize_user_id(raw_user_id)
                                 message = potential_msg
                                 break
                 
@@ -162,42 +172,88 @@ class ImpressionUpdateHandler(BaseEventHandler):
                 logger.warning(f"用户 {user_id} 的消息内容为空")
                 return CustomEventHandlerResult(message="消息内容为空")
 
-            # 生成消息ID
-            import time
-            message_id = str(int(time.time() * 1000))
+            # 从主程序数据库获取实际的消息ID
+            message_id = None
+            message_timestamp = None
+            
+            # 尝试从多个来源获取时间戳
+            if hasattr(message, 'message_base_info') and message.message_base_info:
+                # 从 message_base_info 获取时间戳
+                if 'time' in message.message_base_info:
+                    message_timestamp = float(message.message_base_info['time'])
+                elif 'timestamp' in message.message_base_info:
+                    message_timestamp = float(message.message_base_info['timestamp'])
+                elif 'create_time' in message.message_base_info:
+                    message_timestamp = float(message.message_base_info['create_time'])
+                logger.debug(f"从 message_base_info 获取时间戳: {message_timestamp}")
+            
+            # 如果没有时间戳，使用当前时间
+            if not message_timestamp:
+                import time
+                message_timestamp = time.time()
+                logger.debug(f"使用当前时间作为时间戳: {message_timestamp}")
+            
+            # 尝试获取主程序message_id
+            if self.weight_service.db_service and self.weight_service.db_service.is_connected():
+                message_id = self.weight_service.db_service.get_main_message_id(user_id, message_timestamp)
+                if message_id:
+                    logger.info(f"获取到主程序实际消息ID: {message_id}")
+                else:
+                    logger.debug(f"无法从主程序数据库获取message_id，用户: {user_id}, 时间戳: {message_timestamp}")
+            
+            # 如果无法获取到主程序ID，使用当前时间戳作为临时ID（向后兼容）
+            if not message_id:
+                import time
+                message_id = f"temp_{user_id}_{int(message_timestamp)}"
+                logger.warning(f"无法获取主程序消息ID，使用临时ID: {message_id}")
+                
+            # 记录调试信息
+            logger.debug(f"消息处理详情 - 用户: {user_id}, 时间戳: {message_timestamp}, message_id: {message_id}, 内容: {message_content[:50]}...")
 
-            # 检查消息是否已处理
-            if self.message_service.is_message_processed(user_id, message_id):
+            # 检查消息是否已处理（基于message_id）
+            is_processed = self.message_service.is_message_processed(user_id, message_id)
+            logger.debug(f"查重检查 - 用户: {user_id}, message_id: {message_id}, 是否已处理: {is_processed}")
+            if is_processed:
                 logger.debug(f"用户 {user_id} 的消息 {message_id} 已处理，跳过")
                 return CustomEventHandlerResult(message="消息已处理，跳过")
 
-            logger.info(f"开始处理用户 {user_id} 的消息: {message_content[:50]}...")
+            logger.debug(f"开始处理用户 {user_id} 的消息: {message_content[:50]}...")
 
-            # 获取权重评估所需的历史上下文
-            history_context = self.weight_service.get_historical_context_for_weight(user_id)
-            logger.debug(f"获取到权重评估历史上下文，长度: {len(history_context)}")
+            # 立即标记当前消息为已处理（优化时序）
+            self.message_service.record_processed_message(user_id, message_id)
 
-            # 评估消息权重（传递历史上下文）
-            logger.debug(f"开始评估消息权重 - 用户: {user_id}, 消息: {message_content[:50]}...")
-            weight_success, weight_score, weight_level = await self.weight_service.evaluate_message(
-                user_id, message_id, message_content, history_context
-            )
-
-            # 获取筛选后的历史消息（用于印象构建）
+            # 获取过滤后的历史上下文（用于权重评估）
             history_context, processed_ids = self.weight_service.get_filtered_messages(user_id)
-            logger.debug(f"获取到印象构建历史上下文，长度: {len(history_context)}")
+            logger.debug(f"获取到过滤后的历史上下文，长度: {len(history_context)} 字符，包含消息 {len(processed_ids)} 条")
 
-            if not weight_success:
-                logger.warning(f"权重评估失败: {weight_level}")
+            # 检查过滤后的上下文是否为空，如果为空则跳过权重评估
+            weight_success = False
+            weight_score = 0.0
+            weight_level = "low"
+            
+            if len(history_context.strip()) == 0:
+                logger.debug(f"过滤后的上下文为空，跳过权重评估 - 用户: {user_id}")
             else:
-                logger.info(f"权重评估成功 - 分数: {weight_score}, 等级: {weight_level}")
+                # 在异步任务中进行权重评估
+                logger.debug(f"开始评估消息权重 - 用户: {user_id}")
+                weight_success, weight_score, weight_level = await self.weight_service.evaluate_message(
+                    user_id, message_id, message_content, history_context
+                )
+
+                if not weight_success:
+                    logger.warning(f"权重评估失败: {weight_level}")
+                else:
+                    logger.debug(f"权重评估成功 - 分数: {weight_score}, 等级: {weight_level}")
 
             # 根据权重等级决定是否更新印象
             impression_updated = False
             should_update_impression = False
             
-            if weight_success:
-                # 检查权重等级是否满足更新条件
+            if len(history_context.strip()) == 0:
+                logger.info(f"过滤后的上下文为空，跳过印象更新 - 用户: {user_id}")
+                should_update_impression = False
+            elif weight_success:
+                # 有权重评估结果时，根据权重等级决定
                 filter_mode = self.weight_service.filter_mode
                 high_threshold = self.weight_service.high_threshold
                 medium_threshold = self.weight_service.medium_threshold
@@ -209,27 +265,31 @@ class ImpressionUpdateHandler(BaseEventHandler):
                 elif filter_mode == "balanced":
                     should_update_impression = weight_score >= medium_threshold
                 
-                logger.info(f"权重筛选检查 - 模式: {filter_mode}, 分数: {weight_score}, 阈值: {high_threshold}/{medium_threshold}, 是否更新印象: {should_update_impression}")
+                logger.debug(f"权重筛选检查 - 模式: {filter_mode}, 分数: {weight_score}, 阈值: {high_threshold}/{medium_threshold}, 是否更新印象: {should_update_impression}")
             else:
-                logger.warning(f"权重评估失败，跳过印象更新")
+                logger.debug(f"权重评估失败，跳过印象更新")
                 should_update_impression = False
 
-            # 更新印象
+            # 更新印象 - 权重评估通过后再次获取最新的过滤上下文
             if should_update_impression:
                 try:
-                    logger.debug(f"开始构建印象 - 用户: {user_id}, 消息: {message_content[:50]}...")
+                    # 再次获取最新的过滤上下文用于印象构建
+                    latest_context, latest_processed_ids = self.weight_service.get_filtered_messages(user_id)
+                    logger.debug(f"获取到最新的过滤上下文用于印象构建，长度: {len(latest_context)} 字符，包含消息 {len(latest_processed_ids)} 条")
+                    
+                    logger.debug(f"开始构建印象 - 用户: {user_id}")
                     success, impression_result = await self.text_impression_service.build_impression(
-                        user_id, message_content, history_context
+                        user_id, message_content, latest_context
                     )
                     if success:
                         impression_updated = True
-                        logger.info(f"印象更新成功: {impression_result[:50]}...")
+                        logger.debug(f"印象更新成功")
                     else:
-                        logger.warning(f"印象更新失败: {impression_result}")
+                        logger.warning(f"印象更新失败")
                 except Exception as e:
                     logger.error(f"印象更新异常: {str(e)}")
             else:
-                logger.info(f"权重等级不满足印象更新条件 (分数: {weight_score}, 等级: {weight_level})，跳过印象更新")
+                logger.debug(f"权重等级不满足印象更新条件 (分数: {weight_score}, 等级: {weight_level})，跳过印象更新")
 
             # 更新好感度
             affection_updated = False
@@ -250,11 +310,8 @@ class ImpressionUpdateHandler(BaseEventHandler):
                 user_id, message_id, impression_updated, affection_updated
             )
 
-            # 记录已处理的消息
-            for msg_id in processed_ids:
-                self.message_service.record_processed_message(user_id, msg_id)
-
-            self.message_service.record_processed_message(user_id, message_id)
+            # 输出最终处理统计
+            logger.debug(f"用户 {user_id} 消息处理完成: 印象更新 {impression_updated}, 好感度更新 {affection_updated}, 权重分数 {weight_score:.1f}, 等级 {weight_level}")
 
             return CustomEventHandlerResult(message="印象和好感度更新完成")
 
@@ -301,7 +358,7 @@ class ImpressionAffectionPlugin(BasePlugin):
             ),
             "config_version": ConfigField(
                 type=str,
-                default="2.1.1",
+                default="2.2.0",
                 description="配置文件版本"
             )
         },
@@ -432,6 +489,21 @@ class ImpressionAffectionPlugin(BasePlugin):
                 type=int,
                 default=500,
                 description="消息最大字符数"
+            ),
+            "max_cache_size": ConfigField(
+                type=int,
+                default=1000,
+                description="内存缓存最大消息数"
+            ),
+            "max_weight_records": ConfigField(
+                type=int,
+                default=100,
+                description="权重记录最大保存数"
+            ),
+            "history_summary_count": ConfigField(
+                type=int,
+                default=5,
+                description="历史摘要显示消息数"
             )
         },
 
@@ -462,7 +534,7 @@ class ImpressionAffectionPlugin(BasePlugin):
         "prompts": {
             "impression_template": ConfigField(
                 type=str,
-                default="请基于用户的聊天记录生成印象描述，用自然语言描述这个人的性格特点、兴趣爱好、交流方式等，长度50-100字。要求语言自然流畅，像朋友介绍这个人一样。如果信息不足，可以适当推测并用'似乎'、'看起来'等词。历史对话: {history_context} 当前消息: {message}",
+                default="请基于用户的聊天记录生成印象描述，用专业和细致的语言描述这个人的性格特点、兴趣爱好、交流方式等，长度50-100字。要求语言自然流畅。如果信息不足，可以适当推测并用'似乎'、'看起来'等词。历史对话: {history_context} 当前消息: {message}",
                 description="印象分析提示词模板"
             ),
             "affection_template": ConfigField(
@@ -518,6 +590,9 @@ class ImpressionAffectionPlugin(BasePlugin):
                     ImpressionMessageRecord
                 ], safe=True)
                 
+                # 检查并添加新字段（数据库迁移）
+                self._migrate_database()
+                
                 self.db_initialized = True
                 logger.info(f"数据库初始化成功: {DB_PATH}")
                 
@@ -528,6 +603,32 @@ class ImpressionAffectionPlugin(BasePlugin):
             except Exception as e:
                 logger.error(f"数据库初始化失败: {str(e)}")
                 raise e
+
+    def _migrate_database(self):
+        """数据库迁移 - 添加新字段"""
+        try:
+            from .models import ImpressionMessageRecord
+            
+            # 检查 content_hash 字段是否存在
+            cursor = db.execute_sql("PRAGMA table_info(impression_message_records)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'content_hash' not in columns:
+                logger.info("检测到缺少 content_hash 字段，开始数据库迁移...")
+                
+                # 添加 content_hash 字段
+                db.execute_sql("ALTER TABLE impression_message_records ADD COLUMN content_hash TEXT")
+                
+                # 为新字段创建索引
+                db.execute_sql("CREATE INDEX IF NOT EXISTS impression_message_records_user_content_hash ON impression_message_records(user_id, content_hash)")
+                
+                logger.info("数据库迁移完成：已添加 content_hash 字段和索引")
+            else:
+                logger.debug("content_hash 字段已存在，跳过迁移")
+                
+        except Exception as e:
+            logger.error(f"数据库迁移失败: {str(e)}")
+            # 不抛出异常，允许插件继续运行
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """返回插件组件列表"""

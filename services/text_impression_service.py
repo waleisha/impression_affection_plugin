@@ -4,11 +4,15 @@
 
 from typing import Dict, Any, Tuple, Optional, List
 from datetime import datetime
+import re
 
 from ..models import UserImpression
 from ..clients import LLMClient
 from ..utils.constants import AFFECTION_LEVELS
 from .database_service import DatabaseService
+from src.common.logger import get_logger
+
+logger = get_logger("impression_affection_text")
 
 
 class TextImpressionService:
@@ -45,16 +49,24 @@ class TextImpressionService:
             if not success:
                 return False, f"LLM调用失败: {content}"
 
-            # 解析结果
-            impression_data = self._parse_impression_response(content)
-
-            if not impression_data:
-                return False, f"解析失败: {content}"
-
-            # 保存到数据库
-            await self._save_impression(user_id, impression_data, message, enhanced_context)
-
-            return True, impression_data.get("impression", "印象构建成功")
+            # 解析响应
+            impression_result = self._parse_impression_response(content)
+            
+            if impression_result:
+                # 清理印象结果，确保纯中文输出
+                cleaned_impression = self._clean_impression_text(impression_result)
+                
+                # 保存印象
+                success = self._save_impression(user_id, cleaned_impression)
+                if success:
+                    logger.debug(f"印象保存成功")
+                    return True, cleaned_impression
+                else:
+                    logger.warning(f"印象保存失败")
+                    return False, "印象保存失败"
+            else:
+                logger.warning(f"印象解析失败: {content}")
+                return False, "印象解析失败"
 
         except Exception as e:
             return False, f"构建印象失败: {str(e)}"
@@ -107,9 +119,13 @@ class TextImpressionService:
             
             # 添加最近互动
             verified_interactions = []
-            for interaction in recent_interactions[:10]:  # 取最近10条
+            # 从配置获取最近互动条数限制
+            max_recent_interactions = self.config.get("history", {}).get("max_recent_interactions", 10)
+            max_content_length = self.config.get("history", {}).get("max_content_length", 150)
+            
+            for interaction in recent_interactions[:max_recent_interactions]:
                 if interaction.get("content") and len(interaction["content"].strip()) >= 2:
-                    content = interaction["content"][:150]  # 限制长度
+                    content = interaction["content"][:max_content_length]  # 使用配置的长度限制
                     hours_ago = interaction.get("hours_ago", 0)
                     verified_interactions.append(f"[{hours_ago:.1f}小时前] {content}")
             
@@ -124,7 +140,7 @@ class TextImpressionService:
             
             # 限制总长度
             enhanced_context = "\n".join(enhanced_parts)
-            max_context_length = self.config.get("history", {}).get("max_messages", 20) * 100  # 估算长度
+            max_context_length = self.config.get("history", {}).get("max_context_length", 2000)  # 使用配置的上下文长度限制
             if len(enhanced_context) > max_context_length:
                 enhanced_context = enhanced_context[:max_context_length] + "..."
             
@@ -143,8 +159,8 @@ class TextImpressionService:
         template = self.prompts_config.get("impression_template", "").strip()
 
         # 从配置获取长度限制
-        max_history_chars = self.config.get("max_history_chars", 2000)
-        max_message_chars = self.config.get("max_message_chars", 500)
+        max_history_chars = self.config.get("prompts", {}).get("max_history_chars", 2000)
+        max_message_chars = self.config.get("prompts", {}).get("max_message_chars", 500)
 
         if template:
             return template.format(
@@ -159,73 +175,137 @@ class TextImpressionService:
         
         return f"请基于用户的聊天记录生成印象描述，用自然语言描述这个人的性格特点、兴趣爱好、交流方式等，长度50-100字。要求语言自然流畅，像朋友介绍这个人一样。如果信息不足，可以适当推测并用'似乎'、'看起来'等词。历史对话: {limited_history} 当前消息: {limited_message}"
 
-    def _parse_impression_response(self, content: str) -> Dict[str, str]:
-        """解析LLM响应 - 处理自然语言印象"""
-        import logging
+    def _parse_impression_response(self, content: str) -> Optional[str]:
+        """解析印象构建响应"""
+        # 移除可能的JSON格式标记
+        content = content.strip()
         
-        logger = logging.getLogger("impression_affection_system")
+        # 如果是JSON格式，提取内容
+        if content.startswith('{') and content.endswith('}'):
+            try:
+                import json
+                data = json.loads(content)
+                if 'impression' in data:
+                    content = data['impression']
+                elif 'description' in data:
+                    content = data['description']
+            except:
+                pass
         
-        try:
-            # 清理内容
-            content = content.strip()
-            
-            # 如果内容太短，返回空
-            if len(content) < 10:
-                logger.warning("印象响应内容过短")
-                return {}
-            
-            # 直接返回自然语言印象
-            result = {
-                "impression": content
-            }
-            
-            logger.debug(f"解析到自然印象: {content[:50]}...")
-            return result
-            
-        except Exception as e:
-            logger.error(f"解析印象响应异常: {str(e)}")
-            return {}
+        # 移除可能的标记
+        content = re.sub(r'^(印象描述|印象|描述)[:：]\s*', '', content, flags=re.IGNORECASE)
+        content = re.sub(r'["""]', '', content)
+        
+        # 清理多余空白
+        content = re.sub(r'\s+', ' ', content).strip()
+        
+        # 验证内容质量
+        if len(content) < 10:
+            return None
+        
+        if len(content) > 200:
+            content = content[:200] + "..."
+        
+        return content
 
-    async def _save_impression(self, user_id: str, impression_data: Dict[str, str], message: str, context: str):
-        """保存印象数据到数据库"""
+    def _clean_impression_text(self, impression: str) -> str:
+        """
+        清理印象文本，确保纯中文输出
+        
+        Args:
+            impression: 原始印象文本
+            
+        Returns:
+            清理后的印象文本
+        """
+        if not impression:
+            return impression
+        
+        # 移除英文单词和缩写
+        # 匹配英文单词（包括likely、maybe等）
+        cleaned = re.sub(r'\b[a-zA-Z]+\b', '', impression)
+        
+        # 移除多余的标点符号
+        cleaned = re.sub(r'[，,]{2,}', '，', cleaned)
+        cleaned = re.sub(r'[。.]{2,}', '。', cleaned)
+        cleaned = re.sub(r'\s+', '', cleaned)  # 移除所有空白
+        
+        # 移除开头和结尾的标点
+        cleaned = cleaned.strip('，。、；;！!？?')
+        
+        # 确保句子通顺
+        if cleaned and not cleaned.endswith(('。', '！', '？')):
+            cleaned += '。'
+        
+        # 如果清理后内容太短，返回默认值
+        if len(cleaned) < 15:
+            return "该用户性格温和，交流友好，给人良好印象。"
+        
+        return cleaned
+
+    def _save_impression(self, user_id: str, impression_text: str) -> bool:
+        """
+        保存用户印象到数据库
+        
+        Args:
+            user_id: 用户ID
+            impression_text: 印象文本
+            
+        Returns:
+            是否保存成功
+        """
         try:
-            # 获取或创建用户记录
+            # 获取或创建用户印象记录
             impression, created = UserImpression.get_or_create(
                 user_id=user_id,
                 defaults={
-                    "affection_score": 50.0,
-                    "affection_level": "一般",
-                    "message_count": 0
+                    'personality_traits': impression_text,
+                    'updated_at': datetime.now()
                 }
             )
-
-            # 保存自然语言印象到主印象字段
-            natural_impression = impression_data.get("impression", "")
-            if natural_impression:
-                # 将自然印象保存到主印象字段
-                impression.interests_hobbies = natural_impression  # 复用现有字段存储自然印象
-                
-                # 清空其他维度字段，避免混淆
-                impression.personality_traits = ""
-                impression.communication_style = ""
-                impression.emotional_tendencies = ""
-                impression.behavioral_patterns = ""
-                impression.values_attitudes = ""
-                impression.relationship_preferences = ""
-                impression.growth_development = ""
-
-            # 更新统计信息
-            if created:
-                impression.message_count = 1
-            else:
-                impression.message_count += 1
-
-            impression.last_interaction = datetime.now()
-            impression.update_timestamps()
-            impression.save()
-
+            
+            if not created:
+                # 更新现有记录
+                impression.personality_traits = impression_text
+                impression.update_timestamps()
+                impression.save()
+            
+            logger.debug(f"印象已保存: 用户 {user_id}, 印象: {impression_text[:50]}...")
+            return True
+            
         except Exception as e:
-            print(f"保存印象失败: {str(e)}")
+            logger.error(f"保存印象失败: {str(e)}")
+            return False
+
+    def get_impression(self, user_id: str) -> Optional[UserImpression]:
+        """获取用户印象"""
+        try:
+            return UserImpression.get_or_create(user_id=user_id)[0]
+        except Exception as e:
+            logger.error(f"获取印象失败: {str(e)}")
+            return None
+
+    def search_impressions(self, keyword: str, limit: int = 10) -> List[UserImpression]:
+        """搜索印象"""
+        try:
+            impressions = UserImpression.select().where(
+                UserImpression.personality_traits.contains(keyword) |
+                UserImpression.interests_hobbies.contains(keyword) |
+                UserImpression.communication_style.contains(keyword)
+            ).limit(limit)
+            
+            return list(impressions)
+        except Exception as e:
+            logger.error(f"搜索印象失败: {str(e)}")
+            return []
+
+    def get_all_impressions(self) -> List[UserImpression]:
+        """获取所有印象"""
+        try:
+            return list(UserImpression.select())
+        except Exception as e:
+            logger.error(f"获取所有印象失败: {str(e)}")
+            return []
 
     def get_impression(self, user_id: str) -> Optional[UserImpression]:
         """获取用户印象"""
