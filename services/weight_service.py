@@ -109,10 +109,11 @@ class WeightService:
             message_service = MessageService(self.config)
             processed_ids = message_service.get_processed_message_ids(user_id)
             
-            # 过滤掉无效的ID（只保留数字格式的真实message_id）
+            # 过滤掉无效的ID（保留所有有效格式的message_id，包括临时ID）
             valid_ids = set()
             for msg_id in processed_ids:
-                if msg_id and msg_id.isdigit():
+                # 只要不是空字符串，就认为是有效ID（包括临时ID格式）
+                if msg_id and str(msg_id).strip():
                     valid_ids.add(msg_id)
                 else:
                     logger.debug(f"过滤无效message_id: {msg_id}")
@@ -201,9 +202,9 @@ class WeightService:
 
             # 保存到内存
             self._save_weight(normalized_user_id, message_id, message, context, weight_score, weight_level)
-            
-            # 标记消息为已处理（基于message_id）
-            self.mark_message_processed(normalized_user_id, message_id)
+
+            # 不在这里标记消息，等到印象构建成功后由plugin.py统一批量标记
+            # self.mark_message_processed(normalized_user_id, message_id)  # v4修复：已删除
 
             return True, weight_score, weight_level
 
@@ -304,17 +305,22 @@ class WeightService:
         self._save_weight(user_id, message_id, message, context, weight_score, weight_level)
         return True, weight_score, weight_level
 
-    def get_filtered_messages(self, user_id: str, limit: int = 10) -> Tuple[str, list]:
+    def get_filtered_messages(self, user_id: str, limit: int = None) -> Tuple[str, list]:
         """
         获取筛选后的消息用于印象构建（包含上下文）
 
         Args:
             user_id: 用户ID
-            limit: 最大消息数
+            limit: 最大消息数，如果为None则从配置读取
 
         Returns:
             (上下文字符串, 消息ID列表)
         """
+        # 如果没有传入limit，从配置读取
+        if limit is None:
+            history_config = self.config.get("history", {})
+            limit = history_config.get("max_messages", 20)
+
         if self.filter_mode == "disabled":
             return "", []
 
@@ -328,25 +334,6 @@ class WeightService:
         
         # 首先尝试从数据库获取历史消息（排除已处理的）
         db_messages = self._get_historical_messages(normalized_user_id, limit, exclude_message_ids=list(processed_message_ids))
-        
-        # 核心修复：立即将获取到的历史消息标记为已处理
-        if db_messages:
-            try:
-                # 导入MessageService避免循环导入
-                from .message_service import MessageService
-                message_service = MessageService(self.config)
-                
-                marked_count = 0
-                for db_msg in db_messages:
-                    msg_id = db_msg.get("message_id")
-                    if msg_id and msg_id.isdigit():
-                        message_service.mark_message_processed(normalized_user_id, msg_id)
-                        marked_count += 1
-                
-                logger.debug(f"已标记 {marked_count} 条历史消息为已处理: 用户 {normalized_user_id}")
-                
-            except Exception as e:
-                logger.error(f"标记历史消息处理失败: {str(e)}")
         
         # 合并内存中的消息权重记录
         user_messages = self.message_weights.get(normalized_user_id, [])

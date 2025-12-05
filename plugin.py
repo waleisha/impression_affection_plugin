@@ -133,19 +133,29 @@ class ImpressionUpdateHandler(BaseEventHandler):
             
             # 使用标准化的用户ID提取方法
             from .services.message_service import MessageService
-            
-            if hasattr(event_data, 'message_base_info'):
+
+            # 优先使用reply对象（群聊回复场景）
+            # 在群聊中，当Bot回复某个用户时，reply.user_id是被回复的目标用户
+            if hasattr(event_data, 'reply') and event_data.reply and hasattr(event_data.reply, 'user_id'):
+                raw_user_id = event_data.reply.user_id
+                user_id = MessageService.normalize_user_id(raw_user_id)
+                message = event_data
+                logger.debug(f"从reply对象提取用户ID: {user_id} (原始: {raw_user_id})")
+            elif hasattr(event_data, 'message_base_info'):
                 message = event_data
                 raw_user_id = message.message_base_info.get('user_id', '')
                 user_id = MessageService.normalize_user_id(raw_user_id)
+                logger.debug(f"从message_base_info提取用户ID: {user_id} (原始: {raw_user_id})")
             elif hasattr(event_data, 'user_id'):
                 raw_user_id = event_data.user_id
                 user_id = MessageService.normalize_user_id(raw_user_id)
                 message = event_data
+                logger.debug(f"从event_data.user_id提取用户ID: {user_id} (原始: {raw_user_id})")
             elif hasattr(event_data, 'plain_text'):
                 raw_user_id = getattr(event_data, 'user_id', '')
                 user_id = MessageService.normalize_user_id(raw_user_id)
                 message = event_data
+                logger.debug(f"从plain_text分支提取用户ID: {user_id} (原始: {raw_user_id})")
             else:
                 # 尝试从事件数据中提取消息
                 if hasattr(event_data, '__dict__'):
@@ -156,8 +166,9 @@ class ImpressionUpdateHandler(BaseEventHandler):
                                 raw_user_id = potential_msg.user_id
                                 user_id = MessageService.normalize_user_id(raw_user_id)
                                 message = potential_msg
+                                logger.debug(f"从{attr_name}属性提取用户ID: {user_id}")
                                 break
-                
+
                 if not user_id:
                     logger.error(f"无法从事件数据中提取用户ID: {event_data}")
                     return CustomEventHandlerResult(message="无法从事件数据中提取用户ID")
@@ -219,12 +230,19 @@ class ImpressionUpdateHandler(BaseEventHandler):
 
             logger.debug(f"开始处理用户 {user_id} 的消息: {message_content[:50]}...")
 
-            # 立即标记当前消息为已处理（优化时序）
-            self.message_service.record_processed_message(user_id, message_id)
+            # 获取配置
+            history_config = self.plugin_config.get("history", {})
+            max_messages = history_config.get("max_messages", 20)
 
             # 获取过滤后的历史上下文（用于权重评估）
-            history_context, processed_ids = self.weight_service.get_filtered_messages(user_id)
-            logger.info(f"获取到过滤后的历史上下文，长度: {len(history_context)} 字符，包含消息 {len(processed_ids)} 条")
+            history_context, message_ids_in_context = self.weight_service.get_filtered_messages(user_id, limit=max_messages)
+            logger.info(f"获取到过滤后的历史上下文，长度: {len(history_context)} 字符，包含消息 {len(message_ids_in_context)} 条")
+
+            # v5修复：获取到消息后立即标记为已处理，无论后续流程如何
+            # 这样可以保证下次只获取最新的、未处理的消息
+            for msg_id in message_ids_in_context:
+                self.message_service.record_processed_message(user_id, msg_id)
+            logger.info(f"已批量标记 {len(message_ids_in_context)} 条消息为已处理（获取后立即标记）")
 
             # 检查过滤后的上下文是否为空，如果为空则跳过权重评估
             weight_success = False
@@ -244,6 +262,7 @@ class ImpressionUpdateHandler(BaseEventHandler):
                     logger.warning(f"权重评估失败: {weight_level}")
                 else:
                     logger.info(f"权重评估成功 - 分数: {weight_score}, 等级: {weight_level}")
+                    # v5修复：标记逻辑已移到获取消息后立即执行，此处不再重复标记
 
             # 根据权重等级决定是否更新印象
             impression_updated = False
@@ -274,9 +293,9 @@ class ImpressionUpdateHandler(BaseEventHandler):
             if should_update_impression:
                 try:
                     # 再次获取最新的过滤上下文用于印象构建
-                    latest_context, latest_processed_ids = self.weight_service.get_filtered_messages(user_id)
-                    logger.debug(f"获取到最新的过滤上下文用于印象构建，长度: {len(latest_context)} 字符，包含消息 {len(latest_processed_ids)} 条")
-                    
+                    latest_context, latest_message_ids = self.weight_service.get_filtered_messages(user_id, limit=max_messages)
+                    logger.debug(f"获取到最新的过滤上下文用于印象构建，长度: {len(latest_context)} 字符，包含消息 {len(latest_message_ids)} 条")
+
                     logger.debug(f"开始构建印象 - 用户: {user_id}")
                     success, impression_result = await self.text_impression_service.build_impression(
                         user_id, message_content, latest_context
@@ -284,6 +303,7 @@ class ImpressionUpdateHandler(BaseEventHandler):
                     if success:
                         impression_updated = True
                         logger.info(f"印象更新成功")
+                        # v4修复：批量标记逻辑已移到权重评估成功后，此处不再重复标记
                     else:
                         logger.warning(f"印象更新失败")
                 except Exception as e:

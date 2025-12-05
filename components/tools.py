@@ -47,76 +47,43 @@ class GetUserImpressionTool(BaseTool):
                     "content": "错误：缺少user_id参数"
                 }
 
-            logger.debug(f"查询用户 {user_id} 的印象数据")
+            # 标准化用户ID以确保一致性
+            from ..services.database_service import DatabaseService
+            normalized_user_id = DatabaseService.normalize_user_id(user_id)
+            logger.debug(f"查询用户 {normalized_user_id} 的印象数据 (原始ID: {user_id})")
 
-            # 尝试多种用户ID匹配方式
+            # 仅使用精确匹配，禁用模糊匹配以防止错误匹配
             impression = None
-            matched_id = None
-            
-            # 方法1: 直接匹配
+
+            # 直接精确匹配（使用标准化ID）
             try:
                 impression = UserImpression.select().where(
-                    UserImpression.user_id == user_id
+                    UserImpression.user_id == normalized_user_id
                 ).first()
-                if impression:
-                    matched_id = user_id
-                    logger.debug(f"直接匹配成功: {user_id}")
             except Exception as db_error:
-                logger.debug(f"直接匹配失败: {str(db_error)}")
-            
-            # 方法2: 如果直接匹配失败，尝试从消息状态表中查找
-            if not impression:
-                try:
-                    from ..models import UserMessageState
-                    # 查找包含用户名的记录（模糊匹配）
-                    state_records = list(UserMessageState.select().limit(10))
-                    
-                    for record in state_records:
-                        # 这里可以添加更复杂的匹配逻辑，比如昵称映射
-                        # 目前先尝试查找最近的记录
-                        test_impression = UserImpression.select().where(
-                            UserImpression.user_id == record.user_id
-                        ).first()
-                        if test_impression:
-                            impression = test_impression
-                            matched_id = record.user_id
-                            logger.debug(f"通过消息状态表匹配: {user_id} -> {matched_id}")
-                            break
-                            
-                except Exception as db_error:
-                    logger.debug(f"消息状态表匹配失败: {str(db_error)}")
-            
-            # 方法3: 如果还是没有找到，返回最新的印象记录（用于调试）
-            if not impression:
-                try:
-                    impression = UserImpression.select().order_by(UserImpression.updated_at.desc()).first()
-                    if impression:
-                        matched_id = impression.user_id
-                        logger.warning(f"使用最新记录作为备选: {user_id} -> {matched_id}")
-                except Exception as db_error:
-                    logger.debug(f"备选匹配失败: {str(db_error)}")
-            
-            logger.debug(f"最终查询结果: {impression}, 匹配ID: {matched_id}")
+                logger.error(f"精确匹配失败: {str(db_error)}")
+                impression = None
 
             if impression:
+                # 记录查询成功日志
+                logger.info(f"成功获取用户 {normalized_user_id} 的印象 (消息数: {impression.message_count}, 好感度: {impression.affection_score:.1f})")
+
                 # 获取自然语言印象 - 从正确的字段读取
                 natural_impression = impression.personality_traits.strip()  # 修复：从实际存储的字段读取
-                
-                # 显示原始查询ID和实际匹配的ID
+
+                # 显示原始查询ID
                 display_id = user_id
-                if matched_id and matched_id != user_id:
-                    display_id = f"{user_id} (实际ID: {matched_id})"
-                
+
                 # 印象读取成功日志
                 if natural_impression:
                     logger.info(f"印象读取成功: 用户 {display_id}, 印象长度: {len(natural_impression)} 字符")
                 else:
                     logger.warning(f"印象数据为空: 用户 {display_id}")
-                
+
                 # 如果没有自然印象，显示默认信息
                 if not natural_impression:
                     natural_impression = "用户印象正在构建中..."
-                
+
                 result = f"""
 用户印象数据 (ID: {display_id})
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -128,29 +95,8 @@ class GetUserImpressionTool(BaseTool):
 ━━━━━━━━━━━━━━━━━━━━━━
                 """.strip()
             else:
-                # 检查是否有其他相关记录
-                debug_info = ""
-                try:
-                    from ..models import UserMessageState, ImpressionMessageRecord
-                    
-                    # 显示所有用户的记录状态，帮助调试
-                    all_states = list(UserMessageState.select().limit(5))
-                    state_info = []
-                    for state in all_states:
-                        state_info.append(f"{state.user_id}({state.total_messages}条消息)")
-                    
-                    if state_info:
-                        debug_info = f"现有用户: {', '.join(state_info)}"
-                    else:
-                        debug_info = "无用户记录"
-                    
-                    logger.debug(f"用户 {user_id} 无印象数据 - {debug_info}")
-                    
-                except Exception as debug_error:
-                    logger.error(f"调试信息查询失败: {str(debug_error)}")
-                    debug_info = "调试信息查询失败"
-                
-                result = f"暂无用户 {user_id} 的印象数据 ({debug_info})"
+                logger.warning(f"用户 {normalized_user_id} 无印象数据")
+                result = f"暂无用户 {user_id} 的印象数据"
 
             return {
                 "name": self.name,
@@ -191,9 +137,13 @@ class SearchImpressionsTool(BaseTool):
                     "content": "错误：缺少必要参数"
                 }
 
+            # 标准化用户ID以确保一致性
+            from ..services.database_service import DatabaseService
+            normalized_user_id = DatabaseService.normalize_user_id(user_id)
+
             # 获取用户的印象数据
             impression = UserImpression.select().where(
-                UserImpression.user_id == user_id
+                UserImpression.user_id == normalized_user_id
             ).first()
 
             if not impression:

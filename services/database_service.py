@@ -170,9 +170,11 @@ class DatabaseService:
 
             # 构建查询，直接使用真实用户ID过滤
             query_conditions = [
-                "user_id = ?",
-                "user_id IS NOT NULL",
-                "user_id != ''",
+                "chat_info_user_id = ?",
+                "chat_info_user_id IS NOT NULL",
+                "chat_info_user_id != ''",
+                # 只获取用户发送的消息，排除Bot回复（通过昵称匹配）
+                "chat_info_user_nickname = user_nickname",
                 "time >= ?",
                 "time <= ?",
                 "(processed_plain_text IS NOT NULL OR display_message IS NOT NULL)"
@@ -227,13 +229,17 @@ class DatabaseService:
             rows = cursor.fetchall()
             
             # 调试：显示查询结果统计
-            logger.debug(f"数据库查询返回 {len(rows)} 条原始记录")
+            logger.debug(f"数据库查询返回 {len(rows)} 条原始记录 (user_id: {normalized_user_id})")
+            if exclude_message_ids:
+                logger.debug(f"排除 {len(exclude_message_ids)} 个已处理消息ID后的结果")
+            # 验证消息来源
+            logger.debug(f"查询条件包含昵称匹配，仅返回用户自己发送的消息")
 
             # 转换为字典格式，并进行验证
             messages = []
             mismatch_count = 0
             for row in rows:
-                db_user_id = row[8]  # user_id (真实发言人QQ号)
+                db_user_id = row[7]  # chat_info_user_id (真实发言人QQ号)
                 
                 # 验证：确保消息确实属于目标用户
                 if not self.verify_user_id_match(db_user_id, normalized_user_id):
@@ -595,10 +601,10 @@ class DatabaseService:
             # 先尝试精确匹配（较小容差）
             for current_tolerance in [1.0, 5.0, 10.0, 30.0, 60.0]:
                 query = """
-                SELECT message_id, time 
-                FROM messages 
-                WHERE user_id = ? 
-                    AND time >= ? 
+                SELECT message_id, time
+                FROM messages
+                WHERE chat_info_user_id = ?
+                    AND time >= ?
                     AND time <= ?
                 ORDER BY ABS(time - ?) ASC
                 LIMIT 1
@@ -624,11 +630,11 @@ class DatabaseService:
             # 如果所有容差都找不到，尝试获取最新的消息ID
             logger.warning(f"所有容差范围内都未找到匹配消息，尝试获取用户最新消息 (用户: {normalized_user_id})")
             query = """
-            SELECT message_id, time 
-            FROM messages 
-            WHERE user_id = ? 
+            SELECT message_id, time
+            FROM messages
+            WHERE chat_info_user_id = ?
                 AND time <= ?
-            ORDER BY time DESC 
+            ORDER BY time DESC
             LIMIT 1
             """
             
