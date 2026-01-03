@@ -164,8 +164,8 @@ class GetUserImpressionTool(BaseTool):
 
         except Exception as e:
             import logging
-            logger = logging.getLogger("impression_affection_system")
-            logger.error(f"获取印象数据异常: {str(e)}")
+            error_logger = logging.getLogger("impression_affection_system")
+            error_logger.error(f"获取印象数据异常: {str(e)}")
             return {
                 "name": self.name,
                 "content": f"获取印象数据失败: {str(e)}"
