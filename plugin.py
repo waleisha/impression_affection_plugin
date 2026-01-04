@@ -409,7 +409,7 @@ class ImpressionAffectionPlugin(BasePlugin):
             ),
             "config_version": ConfigField(
                 type=str,
-                default="2.2.6",
+                default="2.2.7",
                 description="配置文件版本"
             )
         },
@@ -421,7 +421,7 @@ class ImpressionAffectionPlugin(BasePlugin):
             "provider_type": ConfigField(
                 type=str,
                 default="openai",
-                description="印象构建/好感度更新LLM提供商 (openai/custom)"
+                description="印象构建/好感度更新LLM提供商 (openai)"
             ),
             "api_key": ConfigField(
                 type=str,
