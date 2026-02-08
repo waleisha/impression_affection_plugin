@@ -1,6 +1,5 @@
 """
-好感度更新服务 - 增强版本，支持难度系统
-直接修改原有服务，添加难度和 Nightmare 模式
+好感度更新服务
 """
 
 from typing import Dict, Any, Tuple
@@ -8,16 +7,18 @@ from datetime import datetime
 
 from ..models import UserImpression
 from ..clients import LLMClient
+from src.common.logger import get_logger
 from ..utils.constants import AFFECTION_LEVELS, DIFFICULTY_LEVELS, AFFECTION_INCREMENTS
 
 
 class AffectionService:
-    """好感度更新服务 - 增强版本"""
+    """好感度更新服务"""
 
     def __init__(self, llm_client: LLMClient, config: Dict[str, Any]):
         self.llm_client = llm_client
         self.config = config
         self.prompts_config = config.get("prompts", {})
+        self.logger = get_logger(__name__)
         self.increment_config = config.get("affection_increment", {})
 
         # 获取全局难度设置
@@ -31,7 +32,7 @@ class AffectionService:
 
     async def update_affection(self, user_id: str, message: str) -> Tuple[bool, str]:
         """
-        更新用户好感度 - 增强版本，支持难度系统
+        更新用户好感度
 
         Args:
             user_id: 用户ID
@@ -116,7 +117,7 @@ class AffectionService:
             return False, f"更新好感度失败: {str(e)}"
 
     async def _evaluate_comment_type(self, message: str) -> Tuple[str, str]:
-        """评估评论类型 - 原有逻辑"""
+        """评估评论类型"""
         prompt = self._build_affection_prompt(message)
 
         success, content = await self.llm_client.generate_affection_analysis(prompt)
@@ -282,6 +283,34 @@ TYPE: friendly/neutral/negative;REASON: 评估原因;消息: {message}"""
         except Exception as e:
             return f"获取失败: {str(e)}"
 
+    def get_difficulty_info(self, user_id: str) -> Dict[str, Any]:
+        """获取用户的难度信息"""
+        try:
+            impression = UserImpression.get_or_none(UserImpression.user_id == user_id)
+            if impression:
+                difficulty = impression.difficulty_level
+                config = DIFFICULTY_LEVELS.get(difficulty, DIFFICULTY_LEVELS["normal"])
+                return {
+                    "level": difficulty,
+                    "name": config["name"],
+                    "description": config["description"],
+                    "multiplier": config.get("multiplier", 1.0)
+                }
+            else:
+                return {
+                    "level": self.default_difficulty,
+                    "name": DIFFICULTY_LEVELS[self.default_difficulty]["name"],
+                    "description": DIFFICULTY_LEVELS[self.default_difficulty]["description"],
+                    "multiplier": DIFFICULTY_LEVELS[self.default_difficulty].get("multiplier", 1.0)
+                }
+        except Exception as e:
+            self.logger.error(f"获取难度信息失败: {str(e)}")
+            return {
+                "level": self.default_difficulty,
+                "name": DIFFICULTY_LEVELS[self.default_difficulty]["name"],
+                "description": DIFFICULTY_LEVELS[self.default_difficulty]["description"],
+                "multiplier": DIFFICULTY_LEVELS[self.default_difficulty].get("multiplier", 1.0)
+            }
     def list_all_difficulties(self) -> Dict[str, Dict[str, str]]:
         """列出所有难度等级"""
         return {
