@@ -1,8 +1,8 @@
 """
-常量定义 - 增强版本，添加难度等级（轻量级，基于原有常量）
+常量定义
 """
 
-# 好感度等级定义（原有）
+# 好感度等级定义
 AFFECTION_LEVELS = {
     (90, 100): "非常好",
     (80, 89): "很好",
@@ -13,21 +13,21 @@ AFFECTION_LEVELS = {
     (0, 9): "非常差",
 }
 
-# 权重等级（原有）
+# 权重等级
 WEIGHT_LEVELS = {
     "high": "高权重",
     "medium": "中权重",
     "low": "低权重"
 }
 
-# 评论类型（原有）
+# 评论类型
 COMMENT_TYPES = {
     "friendly": "友善",
     "neutral": "中性",
     "negative": "差劲"
 }
 
-# 难度等级定义（新增）
+# 难度等级定义
 DIFFICULTY_LEVELS = {
     "easy": {
         "name": "简单",
@@ -116,6 +116,10 @@ DEFAULT_CONFIG = {
         "friendly_increment": 2.0,
         "neutral_increment": 0.5,
         "negative_increment": -3.0
+    },
+    "commands": {
+        "allowed_users": [],
+        "enable_commands": True
     },
     "features": {
         "auto_update": True,
