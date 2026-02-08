@@ -69,7 +69,7 @@ DIFFICULTY_LEVELS = {
     }
 }
 
-# 好感度增幅定义（新增）
+# 好感度增幅定义
 AFFECTION_INCREMENTS = {
     "easy": {
         "friendly": 2.0,
@@ -102,7 +102,7 @@ AFFECTION_INCREMENTS = {
     }
 }
 
-# 默认配置（新增）
+# 默认配置
 DEFAULT_CONFIG = {
     "plugin": {
         "enabled": True,
