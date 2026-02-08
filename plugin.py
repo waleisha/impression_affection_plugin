@@ -1,5 +1,8 @@
 """
-印象和好感度系统插件
+印象和好感度系统插件 v3.0.0
+
+基于LLM分析用户行为和消息，构建用户画像并管理好感度
+支持多维度印象和难度等级系统
 """
 
 from typing import List, Tuple, Type, Dict, Any, Optional
@@ -114,6 +117,7 @@ class ImpressionUpdateHandler(BaseEventHandler):
 
             from .services.message_service import MessageService
 
+            # 优先从 ChatStream 获取用户ID
             if hasattr(event_data, 'stream_id') and event_data.stream_id:
                 try:
                     from src.chat.message_receive.chat_stream import get_chat_manager
@@ -127,24 +131,37 @@ class ImpressionUpdateHandler(BaseEventHandler):
                                 raw_user_id = last_message.reply.message_info.user_info.user_id
                                 user_id = MessageService.normalize_user_id(raw_user_id)
                                 message = event_data
+                                logger.debug(f"从 ChatStream reply 获取用户ID: {user_id}")
                             else:
                                 raw_user_id = last_message.message_info.user_info.user_id
                                 user_id = MessageService.normalize_user_id(raw_user_id)
                                 message = event_data
+                                logger.debug(f"从 ChatStream 获取用户ID: {user_id}")
                 except Exception as e:
-                    logger.warning(f"从ChatStream获取用户ID失败: {str(e)}")
+                    logger.warning(f"从 ChatStream 获取用户ID失败: {str(e)}")
 
+            # 从 reply 对象获取（群聊回复场景）
             if not user_id:
                 if hasattr(event_data, 'reply') and event_data.reply and hasattr(event_data.reply, 'user_id'):
                     raw_user_id = event_data.reply.user_id
                     user_id = MessageService.normalize_user_id(raw_user_id)
                     message = event_data
+                    logger.debug(f"从 reply 对象提取用户ID: {user_id}")
+                # 从 message_base_info 获取
+                elif hasattr(event_data, 'message_base_info') and event_data.message_base_info:
+                    raw_user_id = event_data.message_base_info.get('user_id', '')
+                    if raw_user_id:
+                        user_id = MessageService.normalize_user_id(raw_user_id)
+                        message = event_data
+                        logger.debug(f"从 message_base_info 提取用户ID: {user_id}")
+                # 直接从 user_id 属性获取
                 elif hasattr(event_data, 'user_id'):
                     raw_user_id = event_data.user_id
                     user_id = MessageService.normalize_user_id(raw_user_id)
                     message = event_data
+                    logger.debug(f"从 user_id 属性提取用户ID: {user_id}")
                 else:
-                    logger.error(f"无法从事件数据中提取用户ID")
+                    logger.error(f"无法从事件数据中提取用户ID: {type(event_data)}")
                     return CustomEventHandlerResult(message="无法获取用户ID")
 
             if not user_id:
@@ -154,7 +171,7 @@ class ImpressionUpdateHandler(BaseEventHandler):
             if not message_content:
                 return CustomEventHandlerResult(message="消息内容为空")
 
-            # 获取消息ID
+            # 获取消息ID和时间戳
             message_id = None
             message_timestamp = None
 
@@ -168,9 +185,11 @@ class ImpressionUpdateHandler(BaseEventHandler):
                 import time
                 message_timestamp = time.time()
 
+            # 尝试从主程序数据库获取真实 message_id
             if self.weight_service.db_service and self.weight_service.db_service.is_connected():
                 message_id = self.weight_service.db_service.get_main_message_id(user_id, message_timestamp)
 
+            # 如果获取失败，生成临时ID
             if not message_id:
                 import time
                 message_id = f"temp_{user_id}_{int(message_timestamp)}"
@@ -178,15 +197,17 @@ class ImpressionUpdateHandler(BaseEventHandler):
             # 检查消息是否已处理
             is_processed = self.message_service.is_message_processed(user_id, message_id)
             if is_processed:
+                logger.debug(f"消息已处理，跳过: {message_id}")
                 return CustomEventHandlerResult(message="消息已处理，跳过")
 
-            logger.debug(f"开始处理用户 {user_id} 的消息")
+            logger.debug(f"开始处理用户 {user_id} 的消息: {message_id}")
 
-            # 获取历史上下文
+            # 获取历史上下文用于权重评估
             history_config = self.plugin_config.get("history", {})
             max_messages = history_config.get("max_messages", 20)
             history_context, message_ids_in_context = self.weight_service.get_filtered_messages(user_id, limit=max_messages)
 
+            # 记录上下文中的消息为已处理（避免重复处理历史消息）
             for msg_id in message_ids_in_context:
                 self.message_service.record_processed_message(user_id, msg_id)
 
@@ -200,7 +221,7 @@ class ImpressionUpdateHandler(BaseEventHandler):
                     user_id, message_id, message_content, history_context
                 )
 
-            # 更新印象
+            # 根据权重决定是否更新印象
             impression_updated = False
             should_update_impression = False
 
@@ -216,6 +237,7 @@ class ImpressionUpdateHandler(BaseEventHandler):
                 elif filter_mode == "balanced":
                     should_update_impression = weight_score >= medium_threshold
 
+            # 更新印象
             if should_update_impression:
                 try:
                     latest_context, latest_message_ids = self.weight_service.get_filtered_messages(user_id, limit=max_messages)
@@ -224,14 +246,14 @@ class ImpressionUpdateHandler(BaseEventHandler):
                     )
                     if success:
                         impression_updated = True
-                        logger.info(f"印象更新成功")
+                        logger.info(f"印象更新成功: 用户 {user_id}")
                 except Exception as e:
                     logger.error(f"印象更新异常: {str(e)}")
 
             # 更新好感度
             affection_updated = False
             try:
-                # 获取难度等级并传递给服务
+                # 修复：直接调用 update_affection，不传入 source 参数
                 success, affection_result = await self.affection_service.update_affection(
                     user_id, message_content
                 )
@@ -246,7 +268,7 @@ class ImpressionUpdateHandler(BaseEventHandler):
                 user_id, message_id, impression_updated, affection_updated
             )
 
-            logger.debug(f"用户 {user_id} 消息处理完成")
+            logger.debug(f"用户 {user_id} 消息处理完成: 印象更新={impression_updated}, 好感度更新={affection_updated}")
             return CustomEventHandlerResult(message="印象和好感度更新完成")
 
         except Exception as e:
@@ -264,14 +286,15 @@ class ImpressionUpdateHandler(BaseEventHandler):
                 str(seg.data) for seg in message.message_segments
                 if hasattr(seg, 'data')
             ])
+        elif hasattr(message, 'content') and message.content:
+            message_content = str(message.content)
 
         return message_content.strip()
 
 
 @register_plugin
 class ImpressionAffectionPlugin(BasePlugin):
-    """印象和好感度系统插件 """
-
+    """印象和好感度系统插件 v3.0.0"""
     plugin_name = "impression_affection_plugin"
     enable_plugin = True
     dependencies = []
@@ -423,6 +446,21 @@ class ImpressionAffectionPlugin(BasePlugin):
                 type=int,
                 default=24,
                 description="最近互动回溯小时数"
+            ),
+            "max_recent_interactions": ConfigField(
+                type=int,
+                default=10,
+                description="最大最近互动条数"
+            ),
+            "max_content_length": ConfigField(
+                type=int,
+                default=150,
+                description="单条消息内容最大长度"
+            ),
+            "max_context_length": ConfigField(
+                type=int,
+                default=2000,
+                description="上下文总长度限制"
             )
         },
 
@@ -441,6 +479,36 @@ class ImpressionAffectionPlugin(BasePlugin):
                 type=float,
                 default=40.0,
                 description="中权重阈值"
+            ),
+            "use_custom_weight_model": ConfigField(
+                type=bool,
+                default=False,
+                description="是否使用独立的权重评估模型"
+            ),
+            "weight_model_provider": ConfigField(
+                type=str,
+                default="openai",
+                description="权重评估模型提供商"
+            ),
+            "weight_model_api_key": ConfigField(
+                type=str,
+                default="",
+                description="权重评估模型API密钥"
+            ),
+            "weight_model_base_url": ConfigField(
+                type=str,
+                default="https://api.openai.com/v1",
+                description="权重评估模型基础URL"
+            ),
+            "weight_model_id": ConfigField(
+                type=str,
+                default="gpt-3.5-turbo",
+                description="权重评估模型ID"
+            ),
+            "max_weight_records": ConfigField(
+                type=int,
+                default=100,
+                description="每个用户最大权重记录数"
             )
         },
 
@@ -455,6 +523,21 @@ class ImpressionAffectionPlugin(BasePlugin):
                 type=str,
                 default="请评估消息的情感倾向(friendly/neutral/negative)。返回格式：TYPE: type; REASON: reason; 消息: {message}",
                 description="好感度评估提示词模板"
+            ),
+            "weight_evaluation_prompt": ConfigField(
+                type=str,
+                default="",
+                description="权重评估提示词模板（留空使用默认）"
+            ),
+            "max_history_chars": ConfigField(
+                type=int,
+                default=2000,
+                description="历史上下文最大字符数"
+            ),
+            "max_message_chars": ConfigField(
+                type=int,
+                default=500,
+                description="单条消息最大字符数"
             )
         },
 
@@ -481,6 +564,11 @@ class ImpressionAffectionPlugin(BasePlugin):
                 type=bool,
                 default=True,
                 description="启用工具组件"
+            ),
+            "enable_commands": ConfigField(
+                type=bool,
+                default=True,
+                description="启用命令组件"
             ),
             "enable_difficulty_system": ConfigField(
                 type=bool,
@@ -512,6 +600,7 @@ class ImpressionAffectionPlugin(BasePlugin):
                     ImpressionMessageRecord,
                 ], safe=True)
 
+                # 执行数据库迁移
                 self._migrate_database()
 
                 self.db_initialized = True
@@ -525,10 +614,9 @@ class ImpressionAffectionPlugin(BasePlugin):
                 raise e
 
     def _migrate_database(self):
-        """数据库迁移"""
+        """数据库迁移 - 添加新字段"""
         try:
-            from .models import ImpressionMessageRecord
-
+            # 为 ImpressionMessageRecord 添加 content_hash 字段
             cursor = db.execute_sql("PRAGMA table_info(impression_message_records)")
             columns = [row[1] for row in cursor.fetchall()]
 
@@ -536,25 +624,43 @@ class ImpressionAffectionPlugin(BasePlugin):
                 logger.info("检测到缺少 content_hash 字段，开始数据库迁移...")
                 db.execute_sql("ALTER TABLE impression_message_records ADD COLUMN content_hash TEXT")
                 db.execute_sql("CREATE INDEX IF NOT EXISTS impression_message_records_user_content_hash ON impression_message_records(user_id, content_hash)")
-                logger.info("数据库迁移完成")
+                logger.info("数据库迁移完成：已添加 content_hash 字段和索引")
+            else:
+                logger.debug("content_hash 字段已存在，跳过迁移")
+
+            # 为 UserImpression 添加 difficulty_level 字段
+            cursor = db.execute_sql("PRAGMA table_info(user_impressions)")
+            columns = [row[1] for row in cursor.fetchall()]
+
+            if 'difficulty_level' not in columns:
+                logger.info("检测到缺少 difficulty_level 字段，开始数据库迁移...")
+                db.execute_sql("ALTER TABLE user_impressions ADD COLUMN difficulty_level TEXT DEFAULT 'normal'")
+                logger.info("数据库迁移完成：已添加 difficulty_level 字段")
+            else:
+                logger.debug("difficulty_level 字段已存在，跳过迁移")
 
         except Exception as e:
             logger.error(f"数据库迁移失败: {str(e)}")
+            # 不抛出异常，允许插件继续运行，但记录错误
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """返回插件组件列表"""
         self.init_db()
         components = []
+
+        # 注册事件处理器
         components.append((ImpressionUpdateHandler.get_handler_info(), ImpressionUpdateHandler))
 
         features_config = self.get_config("features", {})
 
+        # 注册工具组件
         if features_config.get("enable_tools", True):
             components.extend([
                 (GetUserImpressionTool.get_tool_info(), GetUserImpressionTool),
                 (SearchImpressionsTool.get_tool_info(), SearchImpressionsTool)
             ])
 
+        # 注册命令组件
         if features_config.get("enable_commands", True):
             components.extend([
                 (ViewImpressionCommand.get_command_info(), ViewImpressionCommand),
