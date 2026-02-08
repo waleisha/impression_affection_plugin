@@ -1,6 +1,5 @@
 """
 印象和好感度系统插件
-支持多难度和多源好感度系统
 """
 
 from typing import List, Tuple, Type, Dict, Any, Optional
@@ -110,7 +109,6 @@ class ImpressionUpdateHandler(BaseEventHandler):
         try:
             self._ensure_services_initialized()
 
-            # [省略用户ID提取逻辑 - 与原版相同]
             user_id = ""
             message = None
 
@@ -234,8 +232,6 @@ class ImpressionUpdateHandler(BaseEventHandler):
             affection_updated = False
             try:
                 # 获取难度等级并传递给服务
-                difficulty_info = self.affection_service.get_difficulty_info(user_id)
-
                 success, affection_result = await self.affection_service.update_affection(
                     user_id, message_content
                 )
