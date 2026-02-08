@@ -253,7 +253,6 @@ class ImpressionUpdateHandler(BaseEventHandler):
             # 更新好感度
             affection_updated = False
             try:
-                # 修复：直接调用 update_affection，不传入 source 参数
                 success, affection_result = await self.affection_service.update_affection(
                     user_id, message_content
                 )
@@ -263,7 +262,19 @@ class ImpressionUpdateHandler(BaseEventHandler):
             except Exception as e:
                 logger.error(f"好感度更新异常: {str(e)}")
 
-            # 更新消息状态
+            # 标记当前消息为已处理
+            try:
+                self.message_service.record_processed_message(
+                    user_id=user_id,
+                    message_id=message_id,
+                    content=message_content,
+                    impression_id=None
+                )
+                logger.debug(f"已记录消息处理状态: 用户 {user_id}, message_id {message_id}, content_hash 已生成")
+            except Exception as e:
+                logger.error(f"记录消息处理状态失败: {str(e)}")
+
+            # 更新消息状态统计
             self.message_service.update_message_state(
                 user_id, message_id, impression_updated, affection_updated
             )
