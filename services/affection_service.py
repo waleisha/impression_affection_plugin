@@ -1,5 +1,5 @@
 """
-好感度更新服务
+好感度更新服务 v3.0.0
 """
 
 from typing import Dict, Any, Tuple
@@ -10,9 +10,8 @@ from ..clients import LLMClient
 from src.common.logger import get_logger
 from ..utils.constants import AFFECTION_LEVELS, DIFFICULTY_LEVELS, AFFECTION_INCREMENTS
 
-
 class AffectionService:
-    """好感度更新服务"""
+    """好感度更新服务 - 支持难度系统和固定好感度"""
 
     def __init__(self, llm_client: LLMClient, config: Dict[str, Any]):
         self.llm_client = llm_client
@@ -38,10 +37,6 @@ class AffectionService:
         # 获取全局难度设置
         self.default_difficulty = config.get("difficulty", {}).get("level", "normal")
         self.allow_difficulty_change = config.get("difficulty", {}).get("allow_user_change", True)
-        # 默认增幅配置（Easy/Normal模式）
-        self.friendly_increment = self.increment_config.get("friendly_increment", 2.0)
-        self.neutral_increment = self.increment_config.get("neutral_increment", 0.5)
-        self.negative_increment = self.increment_config.get("negative_increment", -3.0)
 
     async def update_affection(self, user_id: str, message: str) -> Tuple[bool, str]:
         """
@@ -81,7 +76,7 @@ class AffectionService:
             impression, created = UserImpression.get_or_create(
                 user_id=user_id,
                 defaults={
-                    "affection_score": self.initial_score,  # 使用配置的初始值（不是硬编码50）
+                    "affection_score": self.initial_score,  # 使用配置的初始值
                     "affection_level": self._get_affection_level(self.initial_score),
                     "difficulty_level": self.default_difficulty
                 }
@@ -103,8 +98,8 @@ class AffectionService:
 
             # Nightmare 模式的特殊处理：可能降低好感度
             if difficulty == "nightmare":
-                # 在 Nightmare 模式下，即使是友善的话也可能不够有说服力
-                nightmare_verdict, nightmare_reason = await self._evaluate_nightmare_mode(message, comment_type)
+                # 修复：移除未使用的 initial_type 参数
+                nightmare_verdict, nightmare_reason = await self._evaluate_nightmare_mode(message)
                 if nightmare_verdict == "disagreement":
                     # 用户完全不同意或不感兴趣
                     increment = -difficulty_increments.get("strong_disagreement", -5.0)
@@ -152,7 +147,7 @@ class AffectionService:
             return False, f"更新好感度失败: {str(e)}"
 
     async def _evaluate_comment_type(self, message: str) -> Tuple[str, str]:
-        """评估评论类型 - 原有逻辑"""
+        """评估评论类型"""
         prompt = self._build_affection_prompt(message)
 
         success, content = await self.llm_client.generate_affection_analysis(prompt)
@@ -167,9 +162,10 @@ class AffectionService:
 
         return result.get("type", "neutral"), result.get("reason", "")
 
-    async def _evaluate_nightmare_mode(self, message: str, initial_type: str) -> Tuple[str, str]:
+    async def _evaluate_nightmare_mode(self, message: str) -> Tuple[str, str]:
         """
         Nightmare 模式特殊评估 - 判断用户的真实观点是否与AI一致
+        修复：移除了未使用的 initial_type 参数
 
         Returns:
             (评估结果, 原因), 其中评估结果可以是:
@@ -205,8 +201,9 @@ VERDICT: strong_agreement/normal/minor_disagreement/disagreement;REASON: 原因;
         result = self._parse_affection_response(content)
 
         if result:
-            verdict = result.get("type", "normal")  # 使用 type 字段
+            verdict_type = result.get("type", "normal")
             reason = result.get("reason", "")
+
             # 映射 type 到 verdict
             verdict_map = {
                 "strong_agreement": "strong_agreement",
@@ -215,13 +212,13 @@ VERDICT: strong_agreement/normal/minor_disagreement/disagreement;REASON: 原因;
                 "disagreement": "disagreement",
                 "negative": "disagreement",  # 负面评价视为完全不同意
             }
-            verdict = verdict_map.get(verdict, "normal")
+            verdict = verdict_map.get(verdict_type, "normal")
             return verdict, reason
 
         return "normal", "解析失败"
 
     def _build_affection_prompt(self, message: str) -> str:
-        """构建好感度评估提示词 - 原有逻辑"""
+        """构建好感度评估提示词"""
         template = self.prompts_config.get("affection_template", "").strip()
 
         if template:
@@ -241,7 +238,7 @@ VERDICT: strong_agreement/normal/minor_disagreement/disagreement;REASON: 原因;
 TYPE: friendly/neutral/negative;REASON: 评估原因;消息: {message}"""
 
     def _parse_affection_response(self, content: str) -> Dict[str, str]:
-        """解析好感度响应 - 原有逻辑"""
+        """解析好感度响应 - 支持 TYPE 和 VERDICT 两种键名"""
         import re
 
         content = content.strip()
@@ -250,6 +247,7 @@ TYPE: friendly/neutral/negative;REASON: 评估原因;消息: {message}"""
             return {}
 
         # 使用正则表达式提取 TYPE/VERDICT 和 REASON
+        # 修复：同时支持 TYPE 和 VERDICT 作为键名
         type_match = re.search(r'(?:TYPE|VERDICT):\s*(\w+)', content, re.IGNORECASE)
         reason_match = re.search(r'REASON:\s*(.+?)(?:\n|;消息:|$)', content, re.IGNORECASE)
 
