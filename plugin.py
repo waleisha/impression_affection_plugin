@@ -237,7 +237,7 @@ class ImpressionUpdateHandler(BaseEventHandler):
                 difficulty_info = self.affection_service.get_difficulty_info(user_id)
 
                 success, affection_result = await self.affection_service.update_affection(
-                    user_id, message_content, source="chat"
+                    user_id, message_content
                 )
                 if success:
                     affection_updated = True
