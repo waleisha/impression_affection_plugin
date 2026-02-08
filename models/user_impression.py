@@ -1,17 +1,16 @@
 """
-用户印象模型 - 轻量级增强版（添加难度字段）
-直接修改原有模型，不创建新表
+用户印象模型
 """
 
 from peewee import Model, TextField, FloatField, IntegerField, DateTimeField
 from datetime import datetime
 from .database import db
+from ..utils.constants import DIFFICULTY_LEVELS  # 修复：从常量导入
 
 
 class UserImpression(Model):
     """用户印象模型 - 存储用户的性格特征和行为模式
 
-    增强版：添加了难度等级字段
     """
 
     user_id = TextField(index=True, unique=True)
@@ -30,7 +29,6 @@ class UserImpression(Model):
     affection_score = FloatField(default=50.0)  # 好感度分数(0-100)
     affection_level = TextField(default="一般")  # 好感度等级
 
-    # ==================== 新增：难度系统 ====================
     difficulty_level = TextField(default="normal")  # 难度等级: easy/normal/hard/very_hard/nightmare
 
     # 统计信息
@@ -59,12 +57,12 @@ class UserImpression(Model):
 
     def set_difficulty(self, difficulty_level: str):
         """设置难度等级"""
-        valid_levels = ["easy", "normal", "hard", "very_hard", "nightmare"]
+        valid_levels = list(DIFFICULTY_LEVELS.keys())
         if difficulty_level in valid_levels:
             self.difficulty_level = difficulty_level
             self.update_timestamps()
         else:
-            raise ValueError(f"无效的难度等级: {difficulty_level}")
+            raise ValueError(f"无效的难度等级: {difficulty_level}，有效等级: {valid_levels}")
 
     def increment_impression_version(self):
         """增加印象版本号"""
