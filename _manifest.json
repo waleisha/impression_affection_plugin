@@ -12,6 +12,13 @@
     "min_version": "0.11.0"
   },
   "repository_url": "https://github.com/heitiehu-beep/impression_affection_plugin",
-  "keywords": ["记忆系统","好感度","印象"],
-  "categories": ["Entertainment & Interaction"]
+  "keywords": [
+    "记忆系统",
+    "好感度",
+    "印象"
+  ],
+  "categories": [
+    "Entertainment & Interaction"
+  ],
+  "id": "heitiehu-beep.impression_affection_plugin"
 }
