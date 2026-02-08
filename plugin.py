@@ -458,16 +458,24 @@ class ImpressionAffectionPlugin(BasePlugin):
             )
         },
 
-        "features": {
-            "auto_update": ConfigField(
-                type=bool,
-                default=True,
-                description="自动更新印象和好感度"
+        "commands": {
+            "allowed_users": ConfigField(
+                type=list,
+                default=[],
+                description="允许使用命令的用户ID列表，为空则允许所有人使用"
             ),
             "enable_commands": ConfigField(
                 type=bool,
                 default=True,
                 description="启用管理命令"
+            )
+        },
+
+        "features": {
+            "auto_update": ConfigField(
+                type=bool,
+                default=True,
+                description="自动更新印象和好感度"
             ),
             "enable_tools": ConfigField(
                 type=bool,
