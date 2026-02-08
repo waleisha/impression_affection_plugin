@@ -12,7 +12,6 @@ from src.common.logger import get_logger
 
 logger = get_logger("impression_affection_message")
 
-
 class MessageService:
     """消息管理服务"""
 
