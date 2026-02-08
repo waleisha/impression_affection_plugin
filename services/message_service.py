@@ -18,8 +18,8 @@ class MessageService:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        
-        
+        self.processed_content_hashes = {}
+        self.message_id_cache = {}
 
     @staticmethod
     def normalize_user_id(user_id: Any) -> str:
