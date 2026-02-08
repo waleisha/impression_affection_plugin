@@ -8,7 +8,6 @@ from src.plugin_system import BaseCommand
 from ..models import UserImpression, UserMessageState
 from ..utils.helpers import get_affection_level
 
-
 class BaseImpressionCommand(BaseCommand):
     """提供权限检查功能"""
 
