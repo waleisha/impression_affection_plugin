@@ -20,11 +20,24 @@ class AffectionService:
         self.prompts_config = config.get("prompts", {})
         self.logger = get_logger(__name__)
         self.increment_config = config.get("affection_increment", {})
+        self.affection_config = config.get("affection", {})
+        self.initial_score = self.affection_config.get("initial_score", 50.0)
+
+        # 解析固定好感度列表
+        import json
+        fixed_list_str = self.affection_config.get("fixed_affection_list", "{}")
+        try:
+            self.fixed_affection = json.loads(fixed_list_str)
+            if not isinstance(self.fixed_affection, dict):
+                self.fixed_affection = {}
+                self.logger.warning("固定好感度列表格式错误，应为字典格式")
+        except Exception as e:
+            self.fixed_affection = {}
+            self.logger.warning(f"固定好感度列表解析失败: {fixed_list_str}, 错误: {e}")
 
         # 获取全局难度设置
         self.default_difficulty = config.get("difficulty", {}).get("level", "normal")
         self.allow_difficulty_change = config.get("difficulty", {}).get("allow_user_change", True)
-
         # 默认增幅配置（Easy/Normal模式）
         self.friendly_increment = self.increment_config.get("friendly_increment", 2.0)
         self.neutral_increment = self.increment_config.get("neutral_increment", 0.5)
@@ -32,7 +45,7 @@ class AffectionService:
 
     async def update_affection(self, user_id: str, message: str) -> Tuple[bool, str]:
         """
-        更新用户好感度
+        更新用户好感度 - 增强版本，支持难度系统和固定好感度
 
         Args:
             user_id: 用户ID
@@ -42,12 +55,34 @@ class AffectionService:
             (是否成功, 结果描述)
         """
         try:
-            # 获取或创建用户印象记录
+            # 检查是否是固定好感度用户（固定好感度不会被聊天改变）
+            if user_id in self.fixed_affection:
+                fixed_score = float(self.fixed_affection[user_id])
+
+                # 获取或创建记录
+                impression, created = UserImpression.get_or_create(
+                    user_id=user_id,
+                    defaults={
+                        "affection_score": fixed_score,
+                        "affection_level": self._get_affection_level(fixed_score),
+                        "difficulty_level": self.default_difficulty
+                    }
+                )
+
+                # 如果不是新建的，强制更新为固定值（防止被修改）
+                if not created:
+                    impression.affection_score = fixed_score
+                    impression.affection_level = self._get_affection_level(fixed_score)
+                    impression.save()
+
+                return True, f"固定好感度用户 {user_id}: {fixed_score}分（不会被聊天改变）"
+
+            # 普通用户：使用配置的初始值创建
             impression, created = UserImpression.get_or_create(
                 user_id=user_id,
                 defaults={
-                    "affection_score": 50.0,
-                    "affection_level": "一般",
+                    "affection_score": self.initial_score,  # 使用配置的初始值（不是硬编码50）
+                    "affection_level": self._get_affection_level(self.initial_score),
                     "difficulty_level": self.default_difficulty
                 }
             )
@@ -117,7 +152,7 @@ class AffectionService:
             return False, f"更新好感度失败: {str(e)}"
 
     async def _evaluate_comment_type(self, message: str) -> Tuple[str, str]:
-        """评估评论类型"""
+        """评估评论类型 - 原有逻辑"""
         prompt = self._build_affection_prompt(message)
 
         success, content = await self.llm_client.generate_affection_analysis(prompt)
@@ -240,7 +275,7 @@ TYPE: friendly/neutral/negative;REASON: 评估原因;消息: {message}"""
         return increment
 
     def _get_affection_level(self, score: float) -> str:
-        """根据分数获取好感度等级 - 原有逻辑"""
+        """根据分数获取好感度等级"""
         for (min_score, max_score), level in AFFECTION_LEVELS.items():
             if min_score <= score <= max_score:
                 return level
@@ -311,6 +346,7 @@ TYPE: friendly/neutral/negative;REASON: 评估原因;消息: {message}"""
                 "description": DIFFICULTY_LEVELS[self.default_difficulty]["description"],
                 "multiplier": DIFFICULTY_LEVELS[self.default_difficulty].get("multiplier", 1.0)
             }
+
     def list_all_difficulties(self) -> Dict[str, Dict[str, str]]:
         """列出所有难度等级"""
         return {
